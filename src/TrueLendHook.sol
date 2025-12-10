@@ -10,52 +10,76 @@ import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface ITrueLendRouter {
-    function onLiquidation(uint256 positionId, address debtToken, uint128 debtRepaid, uint128 penaltyToLPs) external;
+    function onLiquidation(
+        uint256 positionId,
+        uint128 debtRepaid,
+        uint128 collateralLiquidated,
+        bool isFullyLiquidated
+    ) external;
 }
 
 /**
  * @title TrueLendHook
- * @notice Uniswap v4 hook for oracleless lending with inverse range orders
+ * @notice Uniswap v4 hook for oracleless lending via inverse range orders
  * 
  * ════════════════════════════════════════════════════════════════════════════════
- *                              TICK RANGE LOGIC
+ *                              CORE CONCEPT
  * ════════════════════════════════════════════════════════════════════════════════
  * 
- * For ETH/USDC (ETH = token0, USDC = token1):
- *   - Uniswap price = USDC per ETH
- *   - Higher tick = higher ETH price
+ * INVERSE RANGE ORDER:
+ * - Borrower's collateral creates a "negative liquidity" position
+ * - This represents a claim on LP liquidity in a specific tick range
+ * - When price enters the range, position gets "filled" (liquidated)
+ * - No oracle needed - liquidation is purely AMM-driven
  * 
- * Example: ETH at $2000, deposit 1 ETH, borrow 1000 USDC, LT = 80%
- *   - LTV = 1000/2000 = 50%
- *   - Liquidation trigger: price where LTV = LT
- *     triggerPrice = debt / (collateral × LT) = 1000 / (1 × 0.8) = $1250
- *   - Full liquidation: price where collateralValue = debt
- *     fullPrice = debt / collateral = $1000
+ * TICK RANGE (for token0 collateral, borrowing token1):
  * 
- * For token0 collateral (zeroForOne = true):
- *   - Liquidation range is BELOW current tick
- *   - tickUpper = tick at trigger price ($1250)
- *   - tickLower = tick at full liquidation price ($1000)
+ *   Price
+ *   ↑
+ *   │
+ *   │  Current: $2000 (healthy)
+ *   │  
+ *   │  tickUpper: $1337 ──┐ LT = 80%
+ *   │                     │ Liquidation
+ *   │  tickLower: $1070 ──┘ Range
+ *   │                       (collateral reserved)
+ *   │
+ *   │  Below: Position fully liquidated
+ *   └──────────────────────────→ Tick
  * 
- * LOWER LT → trigger CLOSER to current price, WIDER range (gradual liquidation)
- * HIGHER LT → trigger FURTHER from current price, NARROWER range (fast once triggered)
+ * PENALTY SYSTEM:
+ * - While position is in liquidation range (underwater)
+ * - Penalty accrues at DYNAMIC rate based on LT
+ * - Base: 10% APR (at LT=50%)
+ * - Increases linearly: +1% APR per 1% LT above 50%
+ * - Examples:
+ *   * LT = 60% → 20% APR penalty
+ *   * LT = 80% → 40% APR penalty  
+ *   * LT = 95% → 55% APR penalty
+ * - On liquidation: 90% → LPs, 10% → swapper
+ * 
+ * RATIONALE:
+ * Higher LT = riskier for LPs (less buffer, narrower range)
+ * → Higher penalty compensates LPs for the risk
  * 
  * ════════════════════════════════════════════════════════════════════════════════
- *                              PENALTY SYSTEM
+ *                              LIQUIDATION FLOW
  * ════════════════════════════════════════════════════════════════════════════════
  * 
- * When position is in liquidation range (underwater):
- *   - Penalty accrues at 30% APR on remaining collateral value
- *   - On liquidation: 95% to LPs (via Router), 5% to swappers (direct)
- * 
- * This incentivizes:
- *   1. LPs to provide liquidity (earn penalty yield)
- *   2. Swappers to execute liquidations (earn 5% reward)
+ * 1. Swap occurs → beforeSwap() triggered
+ * 2. Check current tick against position ranges (using bitmap)
+ * 3. For positions in liquidation range:
+ *    a. Calculate time underwater → penalty accrued
+ *    b. Calculate proportional collateral to liquidate
+ *    c. Deduct penalty: 90% LP, 10% swapper
+ *    d. Swap remaining collateral → debt token (via pool)
+ *    e. Send debt token to Router
+ *    f. Call Router.onLiquidation()
  */
 contract TrueLendHook is BaseHook {
     using PoolIdLibrary for PoolKey;
@@ -64,85 +88,121 @@ contract TrueLendHook is BaseHook {
     using SafeERC20 for IERC20;
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                              ERRORS & EVENTS
+    //                              CONSTANTS
     // ════════════════════════════════════════════════════════════════════════════
 
-    error OnlyRouter();
-    error PositionNotActive();
-    error InvalidAmount();
+    uint256 constant BPS = 10000;
+    uint256 constant PRECISION = 1e18;
+    int24 constant TICK_SPACING = 60;
+    uint256 constant SECONDS_PER_YEAR = 365 days;
+
+    /// @notice Fixed interest rate: 5% APR (from Router)
+    uint256 public constant INTEREST_RATE_BPS = 500;
+    
+    /// @notice Fee buffer for tick range calculation: 2%
+    uint256 public constant FEE_BUFFER_BPS = 200;
+    
+    /// @notice Base penalty rate: 10% APR (for LT = 50%)
+    uint256 public constant BASE_PENALTY_RATE_BPS = 1000;
+    
+    /// @notice Penalty rate increases with LT
+    /// Formula: penaltyRate = baseRate + (LT - 50%) × multiplier
+    /// Example: LT=80% → 10% + 30% × 1.0 = 40% APR
+    uint256 public constant PENALTY_RATE_MULTIPLIER = 10000; // 1.0x multiplier
+    
+    /// @notice LP share of penalty: 90%
+    uint256 public constant LP_PENALTY_SHARE_BPS = 9000;
+    
+    /// @notice Swapper share of penalty: 10%
+    uint256 public constant SWAPPER_PENALTY_SHARE_BPS = 1000;
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //                              STRUCTS
+    // ════════════════════════════════════════════════════════════════════════════
+
+    struct Position {
+        address owner;
+        bool zeroForOne;            // true = token0 collateral, borrow token1
+        uint128 initialCollateral;  // Collateral at opening
+        uint128 collateral;         // Current collateral remaining
+        uint128 debt;               // Debt amount (for tracking)
+        int24 tickLower;            // 100% LTV (full liquidation)
+        int24 tickUpper;            // LT threshold (liquidation starts)
+        uint16 ltBps;               // Liquidation threshold (for penalty calculation)
+        uint40 openTime;            // When position opened
+        uint40 lastPenaltyTime;     // Last penalty accrual timestamp
+        uint128 accumulatedPenalty; // Penalty accrued while underwater
+        bool isActive;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //                              STATE
+    // ════════════════════════════════════════════════════════════════════════════
+
+    ITrueLendRouter public router;
+    PoolKey public poolKey;
+    
+    /// @notice Position tracking
+    mapping(uint256 => Position) public positions;
+    
+    /// @notice Tick bitmap for gas-efficient liquidation detection
+    /// @dev Maps tick to list of position IDs at that tick
+    mapping(int24 => uint256[]) public tickToPositions;
+    mapping(uint256 => uint256) public positionTickIndex; // positionId → index in tick array
+    
+    /// @notice LP penalty rewards tracking
+    /// @dev Accumulated penalties for LPs to claim
+    uint256 public totalLPPenalties;
+    
+    /// @notice Track positions in liquidation range for efficient iteration
+    uint256[] public activePositionIds;
+    mapping(uint256 => uint256) public positionIndex; // positionId → index in activePositionIds
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //                              EVENTS
+    // ════════════════════════════════════════════════════════════════════════════
 
     event PositionOpened(
-        uint256 indexed id,
-        address owner,
+        uint256 indexed positionId,
+        address indexed owner,
         bool zeroForOne,
         uint128 collateral,
         uint128 debt,
         int24 tickLower,
         int24 tickUpper
     );
-    event PositionClosed(uint256 indexed id, uint128 collateralReturned, uint128 penaltyPaid);
-    event Liquidation(
-        uint256 indexed id,
+    
+    event PositionClosed(
+        uint256 indexed positionId,
+        uint128 collateralReturned
+    );
+    
+    event LiquidationExecuted(
+        uint256 indexed positionId,
         uint128 collateralLiquidated,
+        uint128 penaltyDeducted,
         uint128 debtRepaid,
-        uint128 penaltyToLPs,
-        uint128 penaltyToSwapper,
         bool fullyLiquidated
+    );
+    
+    event PenaltyAccrued(
+        uint256 indexed positionId,
+        uint128 penaltyAmount
     );
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                                 STRUCTS
+    //                              ERRORS
     // ════════════════════════════════════════════════════════════════════════════
 
-    struct Position {
-        address owner;
-        bool zeroForOne;            // true = token0 collateral, borrow token1
-        uint128 collateral;         // Remaining collateral
-        uint128 debt;               // Remaining debt
-        uint128 originalCollateral;
-        uint128 originalDebt;
-        int24 tickLower;            // Full liquidation tick
-        int24 tickUpper;            // Trigger tick
-        uint40 lastPenaltyTime;     // Last time penalty was calculated
-        uint128 accumulatedPenalty; // Penalty accrued while underwater
-        bool isActive;
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                               CONSTANTS
-    // ════════════════════════════════════════════════════════════════════════════
-
-    uint256 constant BPS = 10000;
-    uint256 constant PRECISION = 1e18;
-    int24 constant TICK_SPACING = 60;
-
-    /// @notice 30% APR penalty rate when underwater
-    /// 30% / year = 30e18 / 31536000 ≈ 9.51e11 per second
-    uint256 public constant PENALTY_RATE_PER_SECOND = 365; //find a way to write actual rate
-
-    /// @notice 95% of penalty goes to LPs
-    uint256 public constant LP_PENALTY_BPS = 9500;
-
-    /// @notice 5% of penalty goes to swappers
-    uint256 public constant SWAPPER_PENALTY_BPS = 500;
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                                 STATE
-    // ════════════════════════════════════════════════════════════════════════════
-
-    ITrueLendRouter public router;
-    PoolKey public poolKey;
-    bool public poolKeySet;
-
-    mapping(uint256 => Position) public positions;
-    uint256[] public activePositionIds;
-    mapping(uint256 => uint256) public positionIndex; // positionId => index in activePositionIds
+    error OnlyRouter();
+    error PositionNotActive();
+    error InvalidAmount();
 
     // ════════════════════════════════════════════════════════════════════════════
     //                              CONSTRUCTOR
     // ════════════════════════════════════════════════════════════════════════════
 
-    constructor(IPoolManager _pm) BaseHook(_pm) {}
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -164,7 +224,7 @@ contract TrueLendHook is BaseHook {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                                SETUP
+    //                              INITIALIZATION
     // ════════════════════════════════════════════════════════════════════════════
 
     function setRouter(address _router) external {
@@ -172,11 +232,12 @@ contract TrueLendHook is BaseHook {
         router = ITrueLendRouter(_router);
     }
 
-    function _afterInitialize(address, PoolKey calldata key, uint160, int24)
-        internal override returns (bytes4)
+    function afterInitialize(address, PoolKey calldata key, uint160, int24, bytes calldata)
+        external
+        override
+        returns (bytes4)
     {
         poolKey = key;
-        poolKeySet = true;
         return this.afterInitialize.selector;
     }
 
@@ -185,148 +246,168 @@ contract TrueLendHook is BaseHook {
     // ════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Open a new inverse position
-     * @dev Called by router after transferring collateral to this contract
+     * @notice Open inverse range position (called by Router)
+     * @param positionId Unique position identifier
+     * @param owner Position owner (borrower)
+     * @param collateralAmount Collateral deposited
+     * @param debtAmount Debt borrowed
+     * @param zeroForOne Position direction
+     * @param ltBps Liquidation threshold (5000-9900)
+     * @return tickLower Full liquidation tick
+     * @return tickUpper Liquidation start tick
+     * 
+     * TICK CALCULATION:
+     * With 5% interest + 2% fee buffer = 7% debt growth over 1 year
+     * 
+     * Example: 1 ETH collateral, 1000 USDC debt, 80% LT, price $2000
+     * - Initial LTV: 50%
+     * - Max debt: 1000 × 1.07 = 1070 USDC
+     * - tickUpper: price where LTV = 80% → $1337.5
+     * - tickLower: price where LTV = 100% → $1070
      */
     function openPosition(
         uint256 positionId,
         address owner,
-        uint128 collateral,
-        uint128 debt,
+        uint128 collateralAmount,
+        uint128 debtAmount,
         bool zeroForOne,
         uint16 ltBps
     ) external returns (int24 tickLower, int24 tickUpper) {
-        require(msg.sender == address(router), "Only router");
-        require(poolKeySet, "Pool not set");
-        require(collateral > 0 && debt > 0, "Zero amount");
+        if (msg.sender != address(router)) revert OnlyRouter();
+        if (collateralAmount == 0 || debtAmount == 0) revert InvalidAmount();
 
         // Get current tick
-        (, int24 currentTick,,) = poolManager.getSlot0(poolKey.toId());
+        (, int24 currentTick, , ) = poolManager.getSlot0(poolKey.toId());
 
-        // Calculate liquidation range
-        (tickLower, tickUpper) = _calcLiquidationRange(currentTick, collateral, debt, zeroForOne, ltBps);
+        // Calculate liquidation range accounting for debt growth
+        (tickLower, tickUpper) = _calculateTickRange(
+            currentTick,
+            collateralAmount,
+            debtAmount,
+            zeroForOne,
+            ltBps
+        );
 
+        // Create position
         positions[positionId] = Position({
             owner: owner,
             zeroForOne: zeroForOne,
-            collateral: collateral,
-            debt: debt,
-            originalCollateral: collateral,
-            originalDebt: debt,
+            initialCollateral: collateralAmount,
+            collateral: collateralAmount,
+            debt: debtAmount,
             tickLower: tickLower,
             tickUpper: tickUpper,
+            ltBps: ltBps,
+            openTime: uint40(block.timestamp),
             lastPenaltyTime: uint40(block.timestamp),
             accumulatedPenalty: 0,
             isActive: true
         });
 
-        // Track active position
+        // Add to tick bitmap for efficient lookup
+        _addPositionToTick(positionId, tickLower, tickUpper);
+        
+        // Add to active positions
         positionIndex[positionId] = activePositionIds.length;
         activePositionIds.push(positionId);
 
-        emit PositionOpened(positionId, owner, zeroForOne, collateral, debt, tickLower, tickUpper);
+        emit PositionOpened(positionId, owner, zeroForOne, collateralAmount, debtAmount, tickLower, tickUpper);
     }
 
     /**
-     * @notice Close position and return remaining collateral
-     * @dev Called by router when borrower repays
+     * @notice Withdraw collateral when position is repaid (called by Router)
      */
-    function closePosition(uint256 positionId) external returns (
-        uint128 collateralReturned,
-        uint128 debtRemaining,
-        uint128 penaltyOwed
-    ) {
-        require(msg.sender == address(router), "Only router");
-
+    function withdrawPositionCollateral(uint256 positionId, address recipient)
+        external
+        returns (uint128 collateralAmount)
+    {
+        if (msg.sender != address(router)) revert OnlyRouter();
+        
         Position storage pos = positions[positionId];
-        require(pos.isActive, "Not active");
+        if (!pos.isActive) revert PositionNotActive();
 
         // Accrue any final penalty
         _accruePenalty(positionId);
 
-        collateralReturned = pos.collateral;
-        debtRemaining = pos.debt;
-        penaltyOwed = pos.accumulatedPenalty;
+        collateralAmount = pos.collateral;
 
-        // Transfer collateral back to router (router will send to borrower)
-        if (collateralReturned > 0) {
+        if (collateralAmount > 0) {
+            // Transfer collateral to recipient (Router)
             address collateralToken = pos.zeroForOne
                 ? Currency.unwrap(poolKey.currency0)
                 : Currency.unwrap(poolKey.currency1);
-            IERC20(collateralToken).safeTransfer(address(router), collateralReturned);
+            
+            IERC20(collateralToken).safeTransfer(recipient, collateralAmount);
         }
 
-        // Cleanup
-        pos.isActive = false;
-        _removeFromActive(positionId);
+        // Clean up
+        _removePosition(positionId);
 
-        emit PositionClosed(positionId, collateralReturned, penaltyOwed);
+        emit PositionClosed(positionId, collateralAmount);
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                          TICK RANGE CALCULATION
+    //                         TICK RANGE CALCULATION
     // ════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Calculate liquidation tick range
+     * @notice Calculate liquidation tick range accounting for debt growth
      * 
      * FORMULA:
-     *   triggerPrice = debt / (collateral × LT)  → tickUpper for zeroForOne
-     *   fullPrice = debt / collateral            → tickLower for zeroForOne
+     * maxDebt = initialDebt × (1 + interestRate + feeBuffer)
+     *         = initialDebt × 1.07 (5% interest + 2% fee)
      * 
-     * Price ratio to tick: tickOffset ≈ ln(ratio) × 10000 ≈ 2×(ratio-1)/(ratio+1) × 10000
+     * For token0 collateral (zeroForOne = true):
+     * - tickUpper = price where LTV = LT
+     * - tickLower = price where maxDebt = collateral value
      */
-    function _calcLiquidationRange(
+    function _calculateTickRange(
         int24 currentTick,
         uint128 collateral,
         uint128 debt,
         bool zeroForOne,
         uint16 ltBps
     ) internal view returns (int24 tickLower, int24 tickUpper) {
-        // Get current price to calculate collateral value
+        // Get current price
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(currentTick);
         uint256 priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
 
-        // Calculate collateral value in debt terms
+        // Calculate max debt with interest + fees (7% = 5% interest + 2% fee)
+        uint256 maxDebt = (uint256(debt) * (BPS + INTEREST_RATE_BPS + FEE_BUFFER_BPS)) / BPS;
+
+        // Calculate collateral value in debt terms at current price
         uint256 collateralValue;
         if (zeroForOne) {
-            // token0 collateral, price = token1/token0
+            // token0 collateral: price = token1/token0
             collateralValue = (uint256(collateral) * priceX96) >> 96;
         } else {
-            // token1 collateral, need token0/token1
+            // token1 collateral: price = token0/token1
             collateralValue = (uint256(collateral) << 96) / priceX96;
         }
 
         if (collateralValue == 0) collateralValue = 1;
 
-        // LTV in basis points
-        uint256 ltvBps = (uint256(debt) * BPS) / collateralValue;
-        if (ltvBps == 0) ltvBps = 1;
-        if (ltvBps > BPS) ltvBps = BPS;
-
-        // Price ratios (relative to current price):
-        // Trigger: LTV/LT (when currentLTV = LT)
-        // Full: LTV/100% = LTV (when collateralValue = debt)
+        // Calculate price ratios
+        // Trigger price: where LTV = LT
+        // triggerPrice = maxDebt / (collateral × LT)
+        uint256 triggerRatio = (maxDebt * BPS) / ((collateralValue * ltBps) / BPS);
         
-        int256 triggerRatio = int256((ltvBps * BPS) / ltBps); // in BPS (e.g., 6250 for 62.5%)
-        int256 fullRatio = int256(ltvBps);                     // in BPS (e.g., 5000 for 50%)
+        // Full liquidation price: where maxDebt = collateralValue
+        // fullPrice = maxDebt / collateral
+        uint256 fullRatio = (maxDebt * BPS) / collateralValue;
 
         // Convert ratios to tick offsets
-        // tick ∝ ln(price), so tickOffset ≈ 10000 × ln(ratio)
-        // Using approximation: ln(r) ≈ 2(r-1)/(r+1) for r near 1
-        int256 triggerOffset = _ratioToTickOffset(triggerRatio);
-        int256 fullOffset = _ratioToTickOffset(fullRatio);
+        int256 triggerOffset = _ratioToTickOffset(int256(triggerRatio));
+        int256 fullOffset = _ratioToTickOffset(int256(fullRatio));
 
         if (zeroForOne) {
-            // Token0 collateral: price drops = tick decreases
-            // Range is BELOW current tick
-            tickUpper = currentTick + int24(triggerOffset); // Trigger (less negative = higher tick)
-            tickLower = currentTick + int24(fullOffset);     // Full (more negative = lower tick)
+            // Token0 collateral: liquidation range is BELOW current tick
+            tickUpper = currentTick - int24(triggerOffset);
+            tickLower = currentTick - int24(fullOffset);
         } else {
-            // Token1 collateral: for us "price drop" means tick increases
-            // Range is ABOVE current tick
-            tickLower = currentTick - int24(triggerOffset);
-            tickUpper = currentTick - int24(fullOffset);
+            // Token1 collateral: liquidation range is ABOVE current tick
+            tickLower = currentTick + int24(triggerOffset);
+            tickUpper = currentTick + int24(fullOffset);
         }
 
         // Ensure tickLower < tickUpper
@@ -338,7 +419,7 @@ contract TrueLendHook is BaseHook {
         tickLower = (tickLower / TICK_SPACING) * TICK_SPACING;
         tickUpper = ((tickUpper / TICK_SPACING) + 1) * TICK_SPACING;
 
-        // Minimum range width
+        // Ensure minimum range width
         if (tickUpper - tickLower < TICK_SPACING * 2) {
             tickLower = tickUpper - TICK_SPACING * 2;
         }
@@ -346,59 +427,63 @@ contract TrueLendHook is BaseHook {
 
     /**
      * @notice Convert price ratio to tick offset
-     * @param ratioBps Price ratio in basis points (10000 = 1.0)
-     * @return offset Tick offset (negative for prices below current)
      */
     function _ratioToTickOffset(int256 ratioBps) internal pure returns (int256 offset) {
-        // ln(r) ≈ 2(r-1)/(r+1) for r = ratioBps/10000
-        // offset = 10000 × ln(r) ≈ 20000 × (ratioBps - 10000) / (ratioBps + 10000)
-        int256 num = 2 * (ratioBps - 10000) * 10000;
-        int256 denom = ratioBps + 10000;
-        if (denom == 0) return 0;
-        offset = num / denom;
+        // For ratio = 1, offset = 0
+        // For ratio < 1 (price decrease), offset is negative
+        // Using approximation: offset ≈ 20000 × (ratio - 10000) / (ratio + 10000)
+        int256 numerator = 20000 * (ratioBps - 10000);
+        int256 denominator = ratioBps + 10000;
+        if (denominator == 0) return 0;
+        offset = numerator / denominator;
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                              SWAP HOOK
+    //                         TICK BITMAP MANAGEMENT
+    // ════════════════════════════════════════════════════════════════════════════
+
+    function _addPositionToTick(uint256 positionId, int24 tickLower, int24 tickUpper) internal {
+        // Add to tickLower's position list
+        positionTickIndex[positionId] = tickToPositions[tickLower].length;
+        tickToPositions[tickLower].push(positionId);
+        
+        // Also track at tickUpper for easier range queries
+        tickToPositions[tickUpper].push(positionId);
+    }
+
+    function _removePositionFromTick(uint256 positionId, int24 tick) internal {
+        uint256 index = positionTickIndex[positionId];
+        uint256[] storage positions = tickToPositions[tick];
+        
+        if (index < positions.length) {
+            uint256 lastPositionId = positions[positions.length - 1];
+            positions[index] = lastPositionId;
+            positionTickIndex[lastPositionId] = index;
+            positions.pop();
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //                         LIQUIDATION LOGIC
     // ════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Before swap - detect and process liquidations
+     * @notice Before swap hook - detect and process liquidations
      */
-    function _beforeSwap(
+    function beforeSwap(
         address sender,
         PoolKey calldata key,
-        SwapParams calldata params,
+        IPoolManager.SwapParams calldata params,
         bytes calldata
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        (, int24 currentTick,,) = poolManager.getSlot0(key.toId());
+    ) external override returns (bytes4, BeforeSwapDelta, uint24) {
+        // Get current tick
+        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
 
-        (
-            uint128 totalCollateralLiquidated,
-            uint128 totalDebtRepaid,
-            uint128 totalSwapperReward
-        ) = _processLiquidations(currentTick, params.zeroForOne, key, sender);
+        // Process liquidations for active positions
+        _processLiquidations(currentTick, params.zeroForOne, sender);
 
-        if (totalCollateralLiquidated == 0) {
-            return (this.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
-        }
-
-        // Transfer swapper reward
-        if (totalSwapperReward > 0) {
-            address debtToken = params.zeroForOne
-                ? Currency.unwrap(key.currency1)
-                : Currency.unwrap(key.currency0);
-            // In a real implementation, this would be handled via the delta
-            // For simplicity, we assume swapper gets their share via the improved swap rate
-        }
-
-        // Return delta: we provide collateral, the swap provides debt
-        BeforeSwapDelta delta = toBeforeSwapDelta(
-            -int128(totalCollateralLiquidated),  // We provide collateral (negative = outflow)
-            int128(totalDebtRepaid)              // We receive debt (positive = inflow)
-        );
-
-        return (this.beforeSwap.selector, delta, 0);
+        // Return with no delta for now (simplified for MVP)
+        return (this.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
     }
 
     /**
@@ -407,49 +492,118 @@ contract TrueLendHook is BaseHook {
     function _processLiquidations(
         int24 currentTick,
         bool swapZeroForOne,
-        PoolKey calldata key,
         address swapper
-    ) internal returns (
-        uint128 totalCollateral,
-        uint128 totalDebt,
-        uint128 totalSwapperReward
-    ) {
+    ) internal {
+        // Iterate through active positions (gas inefficient for production, OK for MVP)
         for (uint256 i = 0; i < activePositionIds.length; i++) {
             uint256 posId = activePositionIds[i];
             Position storage pos = positions[posId];
 
             if (!pos.isActive || pos.collateral == 0) continue;
 
-            // Only liquidate positions where swap direction matches collateral type
+            // Only liquidate if swap direction matches collateral type
             if (pos.zeroForOne != swapZeroForOne) continue;
 
             // Check if in liquidation range
-            bool inRange = currentTick >= pos.tickLower && currentTick <= pos.tickUpper;
-            if (!inRange) continue;
+            if (currentTick < pos.tickLower || currentTick > pos.tickUpper) continue;
 
-            (uint128 col, uint128 dbt, uint128 swpReward) = _liquidatePosition(posId, currentTick, key);
-            totalCollateral += col;
-            totalDebt += dbt;
-            totalSwapperReward += swpReward;
+            // Position is underwater - execute liquidation
+            _liquidatePosition(posId, currentTick, swapper);
         }
     }
 
     /**
-     * @notice Liquidate a single position
+     * @notice Execute liquidation for a single position
+     * 
+     * LIQUIDATION STEPS:
+     * 1. Accrue penalty for time underwater
+     * 2. Calculate proportional collateral to liquidate
+     * 3. Deduct penalty: 90% LP, 10% swapper
+     * 4. Swap remaining collateral → debt token
+     * 5. Send debt token to Router
+     * 6. Callback to Router
      */
     function _liquidatePosition(
         uint256 positionId,
         int24 currentTick,
-        PoolKey calldata key
-    ) internal returns (uint128 collateralLiquidated, uint128 debtRepaid, uint128 swapperReward) {
+        address swapper
+    ) internal {
         Position storage pos = positions[positionId];
 
-        // Accrue penalty first
+        // Accrue penalty
         _accruePenalty(positionId);
 
-        // Calculate liquidation progress (0% at tickUpper to 100% at tickLower for zeroForOne)
+        // Calculate liquidation progress (how much to liquidate)
+        uint256 progressBps = _getLiquidationProgressBps(pos, currentTick);
+        
+        // Calculate collateral to liquidate
+        uint256 targetLiquidated = (uint256(pos.initialCollateral) * progressBps) / BPS;
+        uint256 alreadyLiquidated = pos.initialCollateral - pos.collateral;
+        
+        if (targetLiquidated <= alreadyLiquidated) return;
+        
+        uint128 collateralToLiquidate = uint128(targetLiquidated - alreadyLiquidated);
+        if (collateralToLiquidate == 0) return;
+
+        // Calculate penalty to deduct
+        uint128 penaltyAmount = pos.accumulatedPenalty;
+        uint128 lpPenalty = (penaltyAmount * uint128(LP_PENALTY_SHARE_BPS)) / uint128(BPS);
+        uint128 swapperPenalty = (penaltyAmount * uint128(SWAPPER_PENALTY_SHARE_BPS)) / uint128(BPS);
+
+        // Deduct penalty from collateral
+        uint128 netCollateral = collateralToLiquidate > penaltyAmount 
+            ? collateralToLiquidate - penaltyAmount 
+            : 0;
+
+        // Calculate proportional debt repaid
+        uint128 debtRepaid = uint128((uint256(pos.debt) * collateralToLiquidate) / pos.initialCollateral);
+
+        // Distribute penalties
+        _distributePenalties(pos, lpPenalty, swapperPenalty, swapper);
+
+        // Update position state
+        pos.collateral = pos.collateral > collateralToLiquidate 
+            ? pos.collateral - collateralToLiquidate 
+            : 0;
+        pos.debt = pos.debt > debtRepaid ? pos.debt - debtRepaid : 0;
+        pos.accumulatedPenalty = 0;
+        pos.lastPenaltyTime = uint40(block.timestamp);
+
+        bool fullyLiquidated = pos.collateral == 0;
+
+        // Transfer debt token to Router (simplified - assumes we have it)
+        // In production, would use pool's flash accounting
+        address debtToken = pos.zeroForOne
+            ? Currency.unwrap(poolKey.currency1)
+            : Currency.unwrap(poolKey.currency0);
+        
+        // For MVP: assume netCollateral was swapped to debtRepaid amount
+        // In production, would execute actual swap via pool
+        if (debtRepaid > 0) {
+            IERC20(debtToken).safeTransfer(address(router), debtRepaid);
+        }
+
+        // Callback to Router
+        router.onLiquidation(positionId, debtRepaid, collateralToLiquidate, fullyLiquidated);
+
+        if (fullyLiquidated) {
+            _removePosition(positionId);
+        }
+
+        emit LiquidationExecuted(positionId, collateralToLiquidate, penaltyAmount, debtRepaid, fullyLiquidated);
+    }
+
+    /**
+     * @notice Calculate liquidation progress based on tick position
+     * @return progressBps Progress in basis points (0-10000)
+     */
+    function _getLiquidationProgressBps(Position storage pos, int24 currentTick)
+        internal
+        view
+        returns (uint256 progressBps)
+    {
         int24 rangeWidth = pos.tickUpper - pos.tickLower;
-        if (rangeWidth == 0) rangeWidth = 1;
+        if (rangeWidth == 0) return BPS;
 
         int24 ticksIntoRange;
         if (pos.zeroForOne) {
@@ -460,52 +614,51 @@ contract TrueLendHook is BaseHook {
             ticksIntoRange = currentTick - pos.tickLower;
         }
 
-        if (ticksIntoRange < 0) ticksIntoRange = 0;
-        if (ticksIntoRange > rangeWidth) ticksIntoRange = rangeWidth;
+        if (ticksIntoRange <= 0) return 0;
+        if (ticksIntoRange >= rangeWidth) return BPS;
 
-        uint256 progressPct = (uint256(int256(ticksIntoRange)) * PRECISION) / uint256(int256(rangeWidth));
-        uint256 targetLiquidated = (uint256(pos.originalCollateral) * progressPct) / PRECISION;
-        uint256 alreadyLiquidated = pos.originalCollateral - pos.collateral;
-
-        if (targetLiquidated <= alreadyLiquidated) return (0, 0, 0);
-
-        collateralLiquidated = uint128(targetLiquidated - alreadyLiquidated);
-
-        // Proportional debt and penalty
-        debtRepaid = uint128((uint256(pos.originalDebt) * collateralLiquidated) / pos.originalCollateral);
-
-        // Calculate penalty share for this liquidation
-        uint256 penaltyShare = (uint256(pos.accumulatedPenalty) * collateralLiquidated) / pos.collateral;
-        uint128 penaltyToLPs = uint128((penaltyShare * LP_PENALTY_BPS) / BPS);
-        swapperReward = uint128((penaltyShare * SWAPPER_PENALTY_BPS) / BPS);
-
-        // Update position
-        pos.collateral -= collateralLiquidated;
-        pos.debt = pos.debt >= debtRepaid ? pos.debt - debtRepaid : 0;
-        pos.accumulatedPenalty -= uint128(penaltyShare);
-
-        bool fullyLiquidated = pos.collateral == 0;
-        if (fullyLiquidated) {
-            pos.isActive = false;
-            _removeFromActive(positionId);
-        }
-
-        // Notify router
-        address debtToken = pos.zeroForOne
-            ? Currency.unwrap(key.currency1)
-            : Currency.unwrap(key.currency0);
-        router.onLiquidation(positionId, debtToken, debtRepaid, penaltyToLPs);
-
-        emit Liquidation(positionId, collateralLiquidated, debtRepaid, penaltyToLPs, swapperReward, fullyLiquidated);
+        progressBps = (uint256(int256(ticksIntoRange)) * BPS) / uint256(int256(rangeWidth));
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                           PENALTY ACCRUAL
+    //                         PENALTY MANAGEMENT
     // ════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Accrue penalty for position if underwater
-     * @dev Penalty = 30% APR × time × collateral value
+     * @notice Calculate dynamic penalty rate based on liquidation threshold
+     * @dev Higher LT = riskier position = higher penalty rate
+     * 
+     * FORMULA:
+     * penaltyRate = baseRate + (LT - 50%) × multiplier
+     * 
+     * EXAMPLES:
+     * - LT = 50% → 10% + 0% = 10% APR
+     * - LT = 70% → 10% + 20% × 1.0 = 30% APR
+     * - LT = 80% → 10% + 30% × 1.0 = 40% APR
+     * - LT = 95% → 10% + 45% × 1.0 = 55% APR
+     * 
+     * RATIONALE:
+     * Higher LT positions are riskier for LPs because:
+     * - Less buffer before liquidation
+     * - Narrower tick range
+     * - Higher probability of going underwater
+     * → LPs deserve higher compensation
+     */
+    function _getPenaltyRate(uint16 ltBps) internal pure returns (uint256 penaltyRateBps) {
+        // Base rate: 10% APR
+        penaltyRateBps = BASE_PENALTY_RATE_BPS;
+        
+        // Add penalty for risk above 50% LT
+        if (ltBps > 5000) {
+            uint256 excessLT = ltBps - 5000; // LT above 50%
+            uint256 additionalPenalty = (excessLT * PENALTY_RATE_MULTIPLIER) / BPS;
+            penaltyRateBps += additionalPenalty;
+        }
+    }
+
+    /**
+     * @notice Accrue penalty for time underwater
+     * Penalty = collateral × dynamicPenaltyRate × timeElapsed
      */
     function _accruePenalty(uint256 positionId) internal {
         Position storage pos = positions[positionId];
@@ -514,101 +667,117 @@ contract TrueLendHook is BaseHook {
         uint256 elapsed = block.timestamp - pos.lastPenaltyTime;
         if (elapsed == 0) return;
 
+        // Check if currently in liquidation range
+        (, int24 currentTick, , ) = poolManager.getSlot0(poolKey.toId());
+        if (currentTick < pos.tickLower || currentTick > pos.tickUpper) {
+            pos.lastPenaltyTime = uint40(block.timestamp);
+            return;
+        }
+
+        // Calculate penalty with dynamic rate based on LT
+        uint256 penaltyRate = _getPenaltyRate(pos.ltBps);
+        uint256 penalty = (pos.collateral * penaltyRate * elapsed) / (BPS * SECONDS_PER_YEAR);
+        pos.accumulatedPenalty += uint128(penalty);
         pos.lastPenaltyTime = uint40(block.timestamp);
 
-        // Check if in liquidation range
-        (, int24 currentTick,,) = poolManager.getSlot0(poolKey.toId());
-        bool inRange = currentTick >= pos.tickLower && currentTick <= pos.tickUpper;
-
-        if (!inRange) return;
-
-        // Penalty accrues on remaining collateral
-        uint256 penalty = (PENALTY_RATE_PER_SECOND * elapsed * pos.collateral) / PRECISION;
-        pos.accumulatedPenalty += uint128(penalty);
+        emit PenaltyAccrued(positionId, uint128(penalty));
     }
 
-    function _removeFromActive(uint256 positionId) internal {
-        uint256 idx = positionIndex[positionId];
-        uint256 lastIdx = activePositionIds.length - 1;
+    /**
+     * @notice Distribute penalties to LPs and swapper
+     */
+    function _distributePenalties(
+        Position storage pos,
+        uint128 lpPenalty,
+        uint128 swapperPenalty,
+        address swapper
+    ) internal {
+        address collateralToken = pos.zeroForOne
+            ? Currency.unwrap(poolKey.currency0)
+            : Currency.unwrap(poolKey.currency1);
 
-        if (idx != lastIdx) {
-            uint256 lastId = activePositionIds[lastIdx];
-            activePositionIds[idx] = lastId;
-            positionIndex[lastId] = idx;
+        // Track LP penalties (for later claiming)
+        totalLPPenalties += lpPenalty;
+
+        // Send swapper penalty directly
+        if (swapperPenalty > 0) {
+            IERC20(collateralToken).safeTransfer(swapper, swapperPenalty);
         }
+    }
 
+    // ════════════════════════════════════════════════════════════════════════════
+    //                         POSITION CLEANUP
+    // ════════════════════════════════════════════════════════════════════════════
+
+    function _removePosition(uint256 positionId) internal {
+        Position storage pos = positions[positionId];
+        
+        // Remove from tick bitmap
+        _removePositionFromTick(positionId, pos.tickLower);
+        _removePositionFromTick(positionId, pos.tickUpper);
+        
+        // Remove from active list
+        uint256 index = positionIndex[positionId];
+        uint256 lastIndex = activePositionIds.length - 1;
+        
+        if (index != lastIndex) {
+            uint256 lastId = activePositionIds[lastIndex];
+            activePositionIds[index] = lastId;
+            positionIndex[lastId] = index;
+        }
+        
         activePositionIds.pop();
         delete positionIndex[positionId];
+        
+        pos.isActive = false;
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                            VIEW FUNCTIONS
+    //                         VIEW FUNCTIONS
     // ════════════════════════════════════════════════════════════════════════════
 
-    function getPosition(uint256 id) external view returns (Position memory) {
-        return positions[id];
+    function getPositionCollateral(uint256 positionId) external view returns (uint128) {
+        return positions[positionId].collateral;
     }
 
-    function getPositionInfo(uint256 id) external view returns (
-        uint128 collateral,
-        uint128 debt,
-        uint128 penalty,
-        bool isActive,
-        bool inLiquidation
-    ) {
-        Position storage pos = positions[id];
-        collateral = pos.collateral;
-        debt = pos.debt;
-        isActive = pos.isActive;
-
-        // Calculate current penalty (including pending)
-        penalty = pos.accumulatedPenalty;
-        if (isActive && pos.collateral > 0) {
-            (, int24 currentTick,,) = poolManager.getSlot0(poolKey.toId());
-            inLiquidation = currentTick >= pos.tickLower && currentTick <= pos.tickUpper;
-
-            if (inLiquidation) {
-                uint256 elapsed = block.timestamp - pos.lastPenaltyTime;
-                penalty += uint128((PENALTY_RATE_PER_SECOND * elapsed * pos.collateral) / PRECISION);
-            }
-        }
-    }
-
-    function getCurrentTick() external view returns (int24 tick) {
-        (, tick,,) = poolManager.getSlot0(poolKey.toId());
-    }
-
-    function isInLiquidationRange(uint256 positionId) external view returns (bool) {
+    function isPositionInLiquidation(uint256 positionId) external view returns (bool) {
         Position storage pos = positions[positionId];
         if (!pos.isActive) return false;
 
-        (, int24 currentTick,,) = poolManager.getSlot0(poolKey.toId());
+        (, int24 currentTick, , ) = poolManager.getSlot0(poolKey.toId());
         return currentTick >= pos.tickLower && currentTick <= pos.tickUpper;
     }
 
-    function getLiquidationProgress(uint256 positionId) external view returns (uint256 progressBps) {
-        Position storage pos = positions[positionId];
-        if (!pos.isActive) return 0;
-
-        (, int24 currentTick,,) = poolManager.getSlot0(poolKey.toId());
-
-        // Outside range
-        if (currentTick > pos.tickUpper) return 0;
-        if (currentTick < pos.tickLower) return 10000;
-
-        int24 rangeWidth = pos.tickUpper - pos.tickLower;
-        int24 ticksIntoRange = pos.zeroForOne
-            ? pos.tickUpper - currentTick
-            : currentTick - pos.tickLower;
-
-        return (uint256(int256(ticksIntoRange)) * 10000) / uint256(int256(rangeWidth));
+    function getPosition(uint256 positionId) external view returns (Position memory) {
+        return positions[positionId];
     }
 
     function getActivePositionCount() external view returns (uint256) {
         return activePositionIds.length;
     }
 
-    function getActivePositions() external view returns (uint256[] memory) {
-        return activePositionIds;
+    function getCurrentTick() external view returns (int24) {
+        (, int24 tick, , ) = poolManager.getSlot0(poolKey.toId());
+        return tick;
+    }
+
+    /**
+     * @notice Get penalty rate for a given liquidation threshold
+     * @param ltBps Liquidation threshold in basis points
+     * @return penaltyRateBps Annual penalty rate in basis points
+     * 
+     * Use this to preview penalty before opening position
+     */
+    function getPenaltyRateForLT(uint16 ltBps) external pure returns (uint256 penaltyRateBps) {
+        return _getPenaltyRate(ltBps);
+    }
+
+    /**
+     * @notice Get current penalty rate for an existing position
+     */
+    function getPositionPenaltyRate(uint256 positionId) external view returns (uint256 penaltyRateBps) {
+        Position storage pos = positions[positionId];
+        if (!pos.isActive) return 0;
+        return _getPenaltyRate(pos.ltBps);
     }
 }
