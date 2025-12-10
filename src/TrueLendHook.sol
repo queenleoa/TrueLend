@@ -11,6 +11,7 @@ import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -31,11 +32,32 @@ interface ITrueLendRouter {
  *                              CORE CONCEPT
  * ════════════════════════════════════════════════════════════════════════════════
  * 
- * INVERSE RANGE ORDER:
- * - Borrower's collateral creates a "negative liquidity" position
- * - This represents a claim on LP liquidity in a specific tick range
- * - When price enters the range, position gets "filled" (liquidated)
- * - No oracle needed - liquidation is purely AMM-driven
+ * INVERSE RANGE ORDER (Reserve Mechanism):
+ * - Borrower's collateral is held by this Hook (NOT in the pool)
+ * - This collateral represents a "claim" on LP liquidity in the tick range
+ * - We do NOT create actual negative liquidity in Uniswap
+ * - Instead, when price enters the range, we intercept swaps via beforeSwap()
+ * - The collateral acts as "reserved liquidity" that gets liquidated
+ * 
+ * HOW RESERVES WORK:
+ * 1. Position opened → collateral stored in Hook
+ * 2. Tick range calculated → [tickLower, tickUpper]
+ * 3. Collateral is "reserved" for this range (conceptually)
+ * 4. When swap moves tick into range → Hook detects it
+ * 5. Hook liquidates proportionally → converts collateral to debt token
+ * 6. This effectively "fills" the inverse order
+ * 
+ * TICK ALIGNMENT:
+ * - All ticks aligned to TICK_SPACING (60)
+ * - Rounding favors borrower safety (conservative)
+ * - If LT/LTV falls between ticks → round to safer tick
+ * - Example: If calculated tick = 123, spacing = 60
+ *   → Floor to 120 (safer for borrower)
+ * 
+ * POSITION TRACKING PER TICK:
+ * - tickToPositions[tick] → list of position IDs at that tick
+ * - During swaps, only check positions in relevant tick ranges
+ * - Gas efficient: O(positions at tick) not O(all positions)
  * 
  * TICK RANGE (for token0 collateral, borrowing token1):
  * 
@@ -232,13 +254,13 @@ contract TrueLendHook is BaseHook {
         router = ITrueLendRouter(_router);
     }
 
-    function afterInitialize(address, PoolKey calldata key, uint160, int24, bytes calldata)
+    function afterInitialize(address, PoolKey calldata key, uint160, int24)
         external
         override
         returns (bytes4)
     {
         poolKey = key;
-        return this.afterInitialize.selector;
+        return BaseHook.afterInitialize.selector;
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -360,6 +382,11 @@ contract TrueLendHook is BaseHook {
      * For token0 collateral (zeroForOne = true):
      * - tickUpper = price where LTV = LT
      * - tickLower = price where maxDebt = collateral value
+     * 
+     * ROUNDING RULES (for borrower safety):
+     * - tickLower: round DOWN (more conservative, triggers later)
+     * - tickUpper: round DOWN (tighter range, but safer for borrower)
+     * - Always align to TICK_SPACING
      */
     function _calculateTickRange(
         int24 currentTick,
@@ -387,13 +414,12 @@ contract TrueLendHook is BaseHook {
 
         if (collateralValue == 0) collateralValue = 1;
 
-        // Calculate price ratios
-        // Trigger price: where LTV = LT
-        // triggerPrice = maxDebt / (collateral × LT)
+        // Calculate price ratios for tick calculation
+        // Trigger price: where LTV = LT → price = maxDebt / (collateral × LT)
+        // For zeroForOne, this means price goes DOWN to reach LT
         uint256 triggerRatio = (maxDebt * BPS) / ((collateralValue * ltBps) / BPS);
         
         // Full liquidation price: where maxDebt = collateralValue
-        // fullPrice = maxDebt / collateral
         uint256 fullRatio = (maxDebt * BPS) / collateralValue;
 
         // Convert ratios to tick offsets
@@ -402,27 +428,75 @@ contract TrueLendHook is BaseHook {
 
         if (zeroForOne) {
             // Token0 collateral: liquidation range is BELOW current tick
+            // Price drops = tick decreases
+            // tickUpper is closer to current (liquidation starts)
+            // tickLower is further (full liquidation)
             tickUpper = currentTick - int24(triggerOffset);
             tickLower = currentTick - int24(fullOffset);
         } else {
             // Token1 collateral: liquidation range is ABOVE current tick
+            // Price rises (token0 gets more expensive) = tick increases
             tickLower = currentTick + int24(triggerOffset);
             tickUpper = currentTick + int24(fullOffset);
         }
 
         // Ensure tickLower < tickUpper
-        if (tickLower > tickUpper) {
-            (tickLower, tickUpper) = (tickUpper, tickLower);
+        if (tickLower >= tickUpper) {
+            // Swap them
+            int24 temp = tickLower;
+            tickLower = tickUpper;
+            tickUpper = temp;
         }
 
-        // Align to tick spacing
-        tickLower = (tickLower / TICK_SPACING) * TICK_SPACING;
-        tickUpper = ((tickUpper / TICK_SPACING) + 1) * TICK_SPACING;
+        // Align to tick spacing with proper rounding
+        // tickLower: round DOWN (floor) - more conservative
+        tickLower = _floorTick(tickLower, TICK_SPACING);
+        
+        // tickUpper: round DOWN (floor) for zeroForOne, UP (ceil) for !zeroForOne
+        // This ensures the range is always slightly tighter (safer for borrower)
+        if (zeroForOne) {
+            tickUpper = _floorTick(tickUpper, TICK_SPACING);
+        } else {
+            tickUpper = _ceilTick(tickUpper, TICK_SPACING);
+        }
 
-        // Ensure minimum range width
+        // Ensure minimum range width (at least 2 ticks)
         if (tickUpper - tickLower < TICK_SPACING * 2) {
-            tickLower = tickUpper - TICK_SPACING * 2;
+            if (zeroForOne) {
+                // Expand downward (make tickLower lower)
+                tickLower = tickUpper - TICK_SPACING * 2;
+            } else {
+                // Expand upward (make tickUpper higher)
+                tickUpper = tickLower + TICK_SPACING * 2;
+            }
         }
+
+        // Final validation: ensure ticks are within valid range
+        require(tickLower < tickUpper, "Invalid tick range");
+        require(tickLower >= TickMath.MIN_TICK, "tickLower too low");
+        require(tickUpper <= TickMath.MAX_TICK, "tickUpper too high");
+    }
+
+    /**
+     * @notice Floor a tick to nearest tick spacing
+     */
+    function _floorTick(int24 tick, int24 tickSpacing) internal pure returns (int24) {
+        int24 compressed = tick / tickSpacing;
+        if (tick < 0 && tick % tickSpacing != 0) {
+            compressed--; // Round down for negative
+        }
+        return compressed * tickSpacing;
+    }
+
+    /**
+     * @notice Ceil a tick to nearest tick spacing
+     */
+    function _ceilTick(int24 tick, int24 tickSpacing) internal pure returns (int24) {
+        int24 compressed = tick / tickSpacing;
+        if (tick > 0 && tick % tickSpacing != 0) {
+            compressed++; // Round up for positive
+        }
+        return compressed * tickSpacing;
     }
 
     /**
@@ -453,13 +527,13 @@ contract TrueLendHook is BaseHook {
 
     function _removePositionFromTick(uint256 positionId, int24 tick) internal {
         uint256 index = positionTickIndex[positionId];
-        uint256[] storage positions = tickToPositions[tick];
+        uint256[] storage positionList = tickToPositions[tick];
         
-        if (index < positions.length) {
-            uint256 lastPositionId = positions[positions.length - 1];
-            positions[index] = lastPositionId;
+        if (index < positionList.length) {
+            uint256 lastPositionId = positionList[positionList.length - 1];
+            positionList[index] = lastPositionId;
             positionTickIndex[lastPositionId] = index;
-            positions.pop();
+            positionList.pop();
         }
     }
 
@@ -473,7 +547,7 @@ contract TrueLendHook is BaseHook {
     function beforeSwap(
         address sender,
         PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
+        SwapParams calldata params,
         bytes calldata
     ) external override returns (bytes4, BeforeSwapDelta, uint24) {
         // Get current tick
@@ -779,5 +853,33 @@ contract TrueLendHook is BaseHook {
         Position storage pos = positions[positionId];
         if (!pos.isActive) return 0;
         return _getPenaltyRate(pos.ltBps);
+    }
+
+    /**
+     * @notice Get total collateral reserved at a specific tick
+     * @dev Useful for debugging and understanding liquidity reserves
+     */
+    function getReservedCollateralAtTick(int24 tick) external view returns (uint128 totalReserved) {
+        uint256[] storage positionIds = tickToPositions[tick];
+        for (uint256 i = 0; i < positionIds.length; i++) {
+            Position storage pos = positions[positionIds[i]];
+            if (pos.isActive) {
+                totalReserved += pos.collateral;
+            }
+        }
+    }
+
+    /**
+     * @notice Check if a tick is properly aligned to spacing
+     */
+    function isTickAligned(int24 tick) external pure returns (bool) {
+        return tick % TICK_SPACING == 0;
+    }
+
+    /**
+     * @notice Get position count at a specific tick
+     */
+    function getPositionCountAtTick(int24 tick) external view returns (uint256) {
+        return tickToPositions[tick].length;
     }
 }
