@@ -38,22 +38,22 @@ interface ITrueLendHook {
  * 
  * ARCHITECTURE:
  * ┌─────────────────────────────────────────────────────────────────┐
- * │                         LENDING POOLS                            │
+ * │                         LENDING POOLS                           │
  * ├─────────────────────────────────────────────────────────────────┤
- * │                                                                  │
+ * │                                                                 │
  * │  Pool 0 (ETH)                    Pool 1 (USDC)                  │
  * │  ├─ totalDeposits                ├─ totalDeposits               │
  * │  ├─ totalBorrows                 ├─ totalBorrows                │
  * │  └─ totalShares                  └─ totalShares                 │
- * │                                                                  │
- * │  BORROW FLOW:                                                    │
+ * │                                                                 │
+ * │  BORROW FLOW:                                                   │
  * │  1. User deposits collateral → Router                           │
  * │  2. Router transfers collateral → Hook                          │
  * │  3. Hook creates inverse range position                         │
  * │  4. Router sends borrowed tokens → User                         │
- * │                                                                  │
+ * │                                                                 │
  * │  LIQUIDATION FLOW (tick-wise):                                  │
- * │  Hook (during swap):                                             │
+ * │  Takes place first in Hook (during swap):                       │
  * │    1. Detects position in range                                 │
  * │    2. Calculates proportional liquidation                       │
  * │    3. Deducts penalty (e.g., 30% of liquidated collateral)      │
@@ -61,20 +61,20 @@ interface ITrueLendHook {
  * │       └─ 5% penalty → Swapper directly (Hook sends)             │
  * │    4. Swaps remaining collateral (after penalty) → debt token   │
  * │    5. Sends debt token to Router                                │
- * │                                                                  │
- * │  Router (callback):                                              │
+ * │                                                                 │
+ * │  Router (callback):                                             │
  * │    1. Receives debt repayment from Hook                         │
  * │    2. Updates: decrease totalBorrows                            │
  * │    3. Tracks position state                                     │
- * │                                                                  │
- * │  REPAY FLOW:                                                     │
+ * │                                                                 │
+ * │  REPAY FLOW:                                                    │
  * │  1. User repays debt + interest → Router                        │
  * │  2. Hook transfers remaining collateral → Router                │
  * │  3. Router returns collateral → User                            │
- * │                                                                  │
+ * │                                                                 │
  * └─────────────────────────────────────────────────────────────────┘
  * 
- * MVP SIMPLIFICATIONS:
+ * MVP:
  * - Fixed interest rate (5% APR)
  * - User-chosen LT (50%-99%)
  * - Flexible initial LTV
