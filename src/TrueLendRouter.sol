@@ -7,12 +7,13 @@ import {TrueLendHook} from "./TrueLendHook.sol";
 
 /**
  * @title DummyRouter
- * @notice Simple router for testing TrueLendHook
+ * @notice Simple router for testing TrueLendHook with proper inverse range order support
  * 
  * This router manages user interactions with the lending hook:
  * - Opens positions by transferring collateral and calling hook
  * - Receives liquidation callbacks from hook
  * - Handles collateral withdrawals
+ * - Tracks liquidation progress (initial liquidity vs remaining)
  */
 contract DummyRouter {
     using SafeERC20 for IERC20;
@@ -76,7 +77,7 @@ contract DummyRouter {
      * @notice Open a new lending position
      * @param positionId Unique identifier for this position
      * @param collateralToken Address of collateral token
-     * @param debtToken Address of debt token
+     * @param debtToken Address of debt token (for event/tracking, not used in logic)
      * @param collateralAmount Amount of collateral to deposit
      * @param debtAmount Amount of debt to borrow
      * @param zeroForOne True if collateral is token0, debt is token1
@@ -133,18 +134,18 @@ contract DummyRouter {
     function onLiquidation(
         uint256 positionId,
         uint128 debtRepaid,
-        bool isFullyLiquidated
+        bool fullyLiquidated
     ) external {
         if (msg.sender != address(hook)) revert OnlyHook();
 
         // Track debt repayment
         totalDebtRepaid[positionId] += debtRepaid;
         
-        if (isFullyLiquidated) {
+        if (fullyLiquidated) {
             positionFullyLiquidated[positionId] = true;
         }
 
-        emit LiquidationReceived(positionId, debtRepaid, isFullyLiquidated);
+        emit LiquidationReceived(positionId, debtRepaid, fullyLiquidated);
     }
 
     /**
@@ -190,6 +191,7 @@ contract DummyRouter {
 
     /**
      * @notice Get position details from hook
+     * Updated to include both liquidityInitial and liquidityRemaining
      */
     function getPosition(uint256 positionId) external view returns (
         address owner,
@@ -199,7 +201,8 @@ contract DummyRouter {
         int24 tickLower,
         int24 tickUpper,
         uint16 ltBps,
-        uint128 liquidity,
+        uint128 liquidityInitial,
+        uint128 liquidityRemaining,
         bool isActive
     ) {
         TrueLendHook.Position memory pos = hook.getPosition(positionId);
@@ -211,8 +214,47 @@ contract DummyRouter {
             pos.tickLower,
             pos.tickUpper,
             pos.ltBps,
-            pos.liquidity,
+            pos.liquidityInitial,
+            pos.liquidityRemaining,
             pos.isActive
         );
+    }
+
+    /**
+     * @notice Get liquidation progress for a position
+     * @return liquidityConsumed How much liquidity has been consumed
+     * @return percentLiquidated Percentage liquidated (in basis points)
+     */
+    function getLiquidationProgress(uint256 positionId) external view returns (
+        uint128 liquidityConsumed,
+        uint256 percentLiquidated
+    ) {
+        TrueLendHook.Position memory pos = hook.getPosition(positionId);
+        
+        if (pos.liquidityInitial == 0) {
+            return (0, 0);
+        }
+
+        liquidityConsumed = pos.liquidityInitial - pos.liquidityRemaining;
+        
+        // Calculate percentage in basis points (10000 = 100%)
+        percentLiquidated = (uint256(liquidityConsumed) * 10000) / uint256(pos.liquidityInitial);
+        
+        return (liquidityConsumed, percentLiquidated);
+    }
+
+    /**
+     * @notice Check if a position is currently in liquidation range
+     */
+    function isInLiquidationRange(uint256 positionId) external view returns (bool) {
+        TrueLendHook.Position memory pos = hook.getPosition(positionId);
+        
+        if (!pos.isActive) {
+            return false;
+        }
+
+        int24 currentTick = hook.getCurrentTick();
+        
+        return (currentTick >= pos.tickLower && currentTick <= pos.tickUpper);
     }
 }
