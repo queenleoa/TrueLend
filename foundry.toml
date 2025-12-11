@@ -13,7 +13,7 @@ ffi = true
 
 # Ignore linting warnings
 [lint]
-lint_on_build = false
+lint_on_build = true
 
 # Gas reporting
 [profile.gas_report]
