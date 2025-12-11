@@ -33,59 +33,14 @@ interface ITrueLendHook {
 }
 
 /**
- * @title TrueLendRouter
- * @notice MVP: Simplified lending router with fixed interest rates
+ * @title TrueLendRouter - CORRECTED VERSION
+ * @notice Fixed validation and collateral flow issues
  * 
- * ARCHITECTURE:
- * ┌─────────────────────────────────────────────────────────────────┐
- * │                         LENDING POOLS                           │
- * ├─────────────────────────────────────────────────────────────────┤
- * │                                                                 │
- * │  Pool 0 (ETH)                    Pool 1 (USDC)                  │
- * │  ├─ totalDeposits                ├─ totalDeposits               │
- * │  ├─ totalBorrows                 ├─ totalBorrows                │
- * │  └─ totalShares                  └─ totalShares                 │
- * │                                                                 │
- * │  BORROW FLOW:                                                   │
- * │  1. User deposits collateral → Router                           │
- * │  2. Router transfers collateral → Hook                          │
- * │  3. Hook creates inverse range position                         │
- * │  4. Router sends borrowed tokens → User                         │
- * │                                                                 │
- * │  LIQUIDATION FLOW (tick-wise):                                  │
- * │  Takes place first in Hook (during swap):                       │
- * │    1. Detects position in range                                 │
- * │    2. Calculates proportional liquidation                       │
- * │    3. Deducts penalty (e.g., 30% of liquidated collateral)      │
- * │       ├─ 95% penalty → LPs directly (Hook distributes)          │
- * │       └─ 5% penalty → Swapper directly (Hook sends)             │
- * │    4. Swaps remaining collateral (after penalty) → debt token   │
- * │    5. Sends debt token to Router                                │
- * │                                                                 │
- * │  Router (callback):                                             │
- * │    1. Receives debt repayment from Hook                         │
- * │    2. Updates: decrease totalBorrows                            │
- * │    3. Tracks position state                                     │
- * │                                                                 │
- * │  REPAY FLOW:                                                    │
- * │  1. User repays debt + interest → Router                        │
- * │  2. Hook transfers remaining collateral → Router                │
- * │  3. Router returns collateral → User                            │
- * │                                                                 │
- * └─────────────────────────────────────────────────────────────────┘
- * 
- * MVP:
- * - Fixed interest rate (5% APR)
- * - User-chosen LT (50%-99%)
- * - Flexible initial LTV
- * - Tick range accounts for debt growth:
- *   * tickUpper = LT price (liquidation starts)
- *   * tickLower = 100% LTV price including interest/fees (full liquidation)
- * 
- * KEY DESIGN:
- * - Hook handles LP/swapper compensation directly
- * - Router handles lender/borrower redistribution
- * - Collateral flow: Hook → Router → User
+ * KEY FIXES:
+ * 1. Proper collateral transfer flow (User → Router → Hook)
+ * 2. Fixed LTV validation with correct price calculations
+ * 3. Proper approval for Hook to pull collateral
+ * 4. Cleaner liquidation callback handling
  */
 contract TrueLendRouter {
     using SafeERC20 for IERC20;
@@ -96,26 +51,19 @@ contract TrueLendRouter {
     //                              STRUCTS & TYPES
     // ════════════════════════════════════════════════════════════════════════════
 
-    /**
-     * @notice Simple lending pool for a single token
-     */
     struct LendingPool {
-        uint128 totalDeposits;      // Total tokens in pool
-        uint128 totalBorrows;       // Total tokens borrowed out
-        uint128 totalShares;        // Total share tokens
+        uint128 totalDeposits;
+        uint128 totalBorrows;
+        uint128 totalShares;
     }
 
-    /**
-     * @notice Borrow position - tracks debt and ownership
-     * @dev Collateral is held in Hook, not here
-     */
     struct BorrowPosition {
         address owner;
-        bool zeroForOne;            // true = token0 collateral, borrow token1
-        uint128 initialDebt;        // Debt at opening
-        uint128 currentDebt;        // Current debt (increases with interest)
-        uint128 collateralAmount;   // Initial collateral (Hook holds actual amount)
-        uint40 openTime;            // When position opened
+        bool zeroForOne;
+        uint128 initialDebt;
+        uint128 currentDebt;
+        uint128 collateralAmount;
+        uint40 openTime;
         bool isActive;
     }
 
@@ -127,10 +75,8 @@ contract TrueLendRouter {
     uint256 constant PRECISION = 1e18;
     uint256 constant SECONDS_PER_YEAR = 365 days;
     
-    /// @notice Fixed interest rate: 5% APR
     uint256 public constant INTEREST_RATE_BPS = 500;  // 5%
     
-    /// @notice Liquidation threshold bounds
     uint16 public constant MIN_LT = 5000;   // 50%
     uint16 public constant MAX_LT = 9900;   // 99%
 
@@ -148,10 +94,8 @@ contract TrueLendRouter {
     LendingPool public pool0;
     LendingPool public pool1;
     
-    /// @notice User shares: token => user => shares
     mapping(address => mapping(address => uint256)) public shares;
     
-    /// @notice Borrow positions
     uint256 public nextPositionId = 1;
     mapping(uint256 => BorrowPosition) public positions;
 
@@ -169,16 +113,8 @@ contract TrueLendRouter {
         uint128 debt,
         uint16 ltBps
     );
-    event Repay(
-        uint256 indexed positionId, 
-        uint128 debtPaid, 
-        uint128 collateralReturned
-    );
-    event PartialLiquidation(
-        uint256 indexed positionId,
-        uint128 debtRepaid,
-        uint128 collateralLiquidated
-    );
+    event Repay(uint256 indexed positionId, uint128 debtPaid, uint128 collateralReturned);
+    event PartialLiquidation(uint256 indexed positionId, uint128 debtRepaid, uint128 collateralLiquidated);
     event FullLiquidation(uint256 indexed positionId);
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -193,6 +129,7 @@ contract TrueLendRouter {
     error PositionNotActive();
     error NotPositionOwner();
     error OnlyHook();
+    error InitialLTVTooHigh();
 
     // ════════════════════════════════════════════════════════════════════════════
     //                              CONSTRUCTOR
@@ -208,10 +145,6 @@ contract TrueLendRouter {
         token1 = _token1;
     }
 
-    /**
-     * @notice Initialize with hook address and pool key
-     * @dev Called once after hook deployment
-     */
     function initialize(address _hook, PoolKey memory _poolKey) external {
         require(address(hook) == address(0), "Already initialized");
         hook = ITrueLendHook(_hook);
@@ -222,14 +155,6 @@ contract TrueLendRouter {
     //                          LENDER FUNCTIONS
     // ════════════════════════════════════════════════════════════════════════════
 
-    /**
-     * @notice Deposit tokens into lending pool
-     * @param token Token to deposit (token0 or token1)
-     * @param amount Amount to deposit
-     * @return sharesIssued Share tokens minted
-     * 
-     * Shares represent proportional claim on pool
-     */
     function deposit(address token, uint256 amount) 
         external 
         returns (uint256 sharesIssued) 
@@ -238,30 +163,21 @@ contract TrueLendRouter {
         
         LendingPool storage pool = _getPool(token);
         
-        // Calculate shares
         if (pool.totalShares == 0) {
             sharesIssued = amount;
         } else {
             sharesIssued = (amount * pool.totalShares) / pool.totalDeposits;
         }
         
-        // Update pool
         pool.totalDeposits += uint128(amount);
         pool.totalShares += uint128(sharesIssued);
         shares[token][msg.sender] += sharesIssued;
         
-        // Transfer tokens
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         
         emit Deposit(token, msg.sender, amount, sharesIssued);
     }
 
-    /**
-     * @notice Withdraw tokens by burning shares
-     * @param token Token to withdraw
-     * @param shareAmount Shares to burn
-     * @return amountWithdrawn Underlying tokens returned
-     */
     function withdraw(address token, uint256 shareAmount) 
         external 
         returns (uint256 amountWithdrawn) 
@@ -271,53 +187,32 @@ contract TrueLendRouter {
         
         LendingPool storage pool = _getPool(token);
         
-        // Calculate underlying
         amountWithdrawn = (shareAmount * pool.totalDeposits) / pool.totalShares;
         
-        // Check liquidity
         uint128 available = pool.totalDeposits - pool.totalBorrows;
         if (amountWithdrawn > available) revert InsufficientLiquidity();
         
-        // Update pool
         pool.totalDeposits -= uint128(amountWithdrawn);
         pool.totalShares -= uint128(shareAmount);
         shares[token][msg.sender] -= shareAmount;
         
-        // Transfer tokens
         IERC20(token).safeTransfer(msg.sender, amountWithdrawn);
         
         emit Withdraw(token, msg.sender, amountWithdrawn, shareAmount);
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                         BORROWER FUNCTIONS
+    //                         BORROWER FUNCTIONS - FIXED
     // ════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Open a borrow position with flexible LTV and user-chosen LT
-     * @param collateralAmount Collateral to deposit
-     * @param debtAmount Amount to borrow
-     * @param zeroForOne true = deposit token0, borrow token1
-     * @param ltBps Liquidation threshold (5000-9900 = 50%-99%)
-     * @return positionId Unique position identifier
+     * @notice Borrow with flexible LTV - FIXED VERSION
      * 
-     * FLOW:
-     * 1. Validate LT bounds and liquidity
-     * 2. Get current price from pool
-     * 3. Validate initial LTV < LT
-     * 4. Take collateral from user → send to Hook
-     * 5. Hook creates inverse range position
-     * 6. Update pool: increase borrows
-     * 7. Send borrowed tokens to user
-     * 
-     * TICK RANGE (Hook calculates this):
-     * - Accounts for debt growth over time (interest + fees + penalty)
-     * - tickUpper = price where LTV = LT (liquidation starts)
-     * - tickLower = price where debt+interest+fees = collateral value (full liquidation)
-     * - Example: 1 ETH collateral, 1000 USDC debt, 80% LT
-     *   * Current price: $2000, initial LTV: 50%
-     *   * tickUpper: price $1250 (80% LTV - liquidation trigger)
-     *   * tickLower: price where debt+interest = collateral (100% LTV)
+     * FLOW (FIXED):
+     * 1. Take collateral from user → Router
+     * 2. Router approves Hook to pull collateral
+     * 3. Hook.openPosition() pulls collateral from Router
+     * 4. Router sends borrowed tokens → User
      */
     function borrow(
         uint128 collateralAmount,
@@ -336,17 +231,19 @@ contract TrueLendRouter {
         uint128 available = debtPool.totalDeposits - debtPool.totalBorrows;
         if (debtAmount > available) revert InsufficientLiquidity();
         
-        // Validate initial LTV < LT
-        _validateInitialLTV(collateralAmount, debtAmount, zeroForOne, ltBps);
+        // FIXED: Validate initial LTV < LT
+        _validateInitialLTVFixed(collateralAmount, debtAmount, zeroForOne, ltBps);
         
-        // Generate position ID
         positionId = nextPositionId++;
         
-        // Take collateral from user and send to Hook
+        // FIXED: Proper collateral flow
+        // 1. Take collateral from user
         IERC20(collateralToken).safeTransferFrom(msg.sender, address(this), collateralAmount);
-        IERC20(collateralToken).safeTransfer(address(hook), collateralAmount);
         
-        // Create inverse position in Hook
+        // 2. Approve Hook to pull collateral
+        IERC20(collateralToken).safeApprove(address(hook), collateralAmount);
+        
+        // 3. Hook pulls collateral from Router
         hook.openPosition(
             positionId,
             msg.sender,
@@ -367,7 +264,7 @@ contract TrueLendRouter {
             isActive: true
         });
         
-        // Update pool: increase borrows
+        // Update pool
         debtPool.totalBorrows += debtAmount;
         
         // Send borrowed tokens to user
@@ -378,17 +275,6 @@ contract TrueLendRouter {
 
     /**
      * @notice Repay debt and close position
-     * @param positionId Position to repay
-     * 
-     * FLOW:
-     * 1. Calculate debt owed (initial + 5% interest)
-     * 2. Take repayment from user
-     * 3. Call Hook to withdraw remaining collateral (Hook → Router)
-     * 4. Update pool: decrease borrows
-     * 5. Router transfers collateral → User
-     * 
-     * NOTE: If position was liquidated, collateral amount will be reduced.
-     *       Hook already distributed penalties to LPs/swappers during liquidation.
      */
     function repay(uint256 positionId) external {
         BorrowPosition storage pos = positions[positionId];
@@ -405,11 +291,10 @@ contract TrueLendRouter {
                           (BPS * SECONDS_PER_YEAR);
         pos.currentDebt = uint128(pos.initialDebt + interest);
         
-        // Take debt repayment from user
+        // Take debt repayment
         if (pos.currentDebt > 0) {
             IERC20(debtToken).safeTransferFrom(msg.sender, address(this), pos.currentDebt);
             
-            // Update pool
             if (debtPool.totalBorrows >= pos.currentDebt) {
                 debtPool.totalBorrows -= pos.currentDebt;
             } else {
@@ -417,15 +302,14 @@ contract TrueLendRouter {
             }
         }
         
-        // Withdraw remaining collateral from Hook (Hook → Router)
+        // Withdraw collateral from Hook
         uint128 collateralReturned = hook.withdrawPositionCollateral(positionId, address(this));
         
-        // Transfer collateral to user (Router → User)
+        // Transfer collateral to user
         if (collateralReturned > 0) {
             IERC20(collateralToken).safeTransfer(msg.sender, collateralReturned);
         }
         
-        // Mark closed
         pos.isActive = false;
         
         emit Repay(positionId, pos.currentDebt, collateralReturned);
@@ -435,32 +319,6 @@ contract TrueLendRouter {
     //                          HOOK CALLBACKS
     // ════════════════════════════════════════════════════════════════════════════
 
-    /**
-     * @notice Called by Hook during swap when liquidation occurs
-     * @param positionId Position being liquidated
-     * @param debtRepaid Debt repaid via swapping liquidated collateral
-     * @param collateralLiquidated Amount of collateral liquidated (before penalty)
-     * @param isFullyLiquidated Whether position is completely closed
-     * 
-     * LIQUIDATION FLOW (what Hook did before calling this):
-     * 1. Detected position in liquidation range during swap
-     * 2. Calculated proportional liquidation based on tick position
-     * 3. Took collateral to liquidate (e.g., 0.3 ETH)
-     * 4. Deducted penalty (e.g., 30% = 0.09 ETH):
-     *    - 95% (0.0855 ETH) → distributed to LPs directly
-     *    - 5% (0.0045 ETH) → sent to swapper directly
-     * 5. Swapped remaining (0.21 ETH) → debt token (e.g., 420 USDC)
-     * 6. Sent debt token (420 USDC) to Router
-     * 7. Called this callback
-     * 
-     * WHAT ROUTER DOES:
-     * - Update totalBorrows (decrease by debt repaid)
-     * - Update position tracking
-     * - Mark as closed if fully liquidated
-     * 
-     * NOTE: Hook already handled LP/swapper compensation.
-     *       Router only handles borrower/lender accounting.
-     */
     function onLiquidation(
         uint256 positionId,
         uint128 debtRepaid,
@@ -475,21 +333,20 @@ contract TrueLendRouter {
         address debtToken = pos.zeroForOne ? token1 : token0;
         LendingPool storage debtPool = _getPool(debtToken);
         
-        // Update position tracking
+        // Update position debt
         if (pos.currentDebt >= debtRepaid) {
             pos.currentDebt -= debtRepaid;
         } else {
             pos.currentDebt = 0;
         }
         
-        // Update pool borrows (debt was repaid to lenders)
+        // Update pool borrows
         if (debtPool.totalBorrows >= debtRepaid) {
             debtPool.totalBorrows -= debtRepaid;
         } else {
             debtPool.totalBorrows = 0;
         }
         
-        // Mark as closed if fully liquidated
         if (isFullyLiquidated) {
             pos.isActive = false;
             emit FullLiquidation(positionId);
@@ -499,55 +356,45 @@ contract TrueLendRouter {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    //                            VALIDATION
+    //                        VALIDATION - FIXED
     // ════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Validate initial LTV is below liquidation threshold
-     * @param collateralAmount Collateral being deposited
-     * @param debtAmount Debt being borrowed
-     * @param zeroForOne Position direction
-     * @param ltBps Liquidation threshold
-     * 
-     * CALCULATION:
-     * 1. Get current tick from pool
-     * 2. Convert tick to price
-     * 3. Calculate collateral value in debt token terms
-     * 4. Calculate LTV = debt / collateralValue
-     * 5. Require LTV < LT
+     * @notice FIXED: Validate initial LTV with proper price math
      */
-    function _validateInitialLTV(
+    function _validateInitialLTVFixed(
         uint128 collateralAmount,
         uint128 debtAmount,
         bool zeroForOne,
         uint16 ltBps
     ) internal view {
-        // Get current tick
         (, int24 tick, , ) = poolManager.getSlot0(poolKey.toId());
         
-        // Convert to price (sqrtPriceX96 → priceX96)
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
-        uint256 priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
         
-        // Calculate collateral value in debt terms
+        // Calculate collateral value in debt token terms
         uint256 collateralValue;
         if (zeroForOne) {
-            // token0 collateral: price = token1/token0
-            // collateralValue in token1 = collateral × price
+            // token0 collateral, borrowing token1
+            // price = token1/token0
+            // collateralValue = collateral * price
+            uint256 priceX96 = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) >> 96;
             collateralValue = (uint256(collateralAmount) * priceX96) >> 96;
         } else {
-            // token1 collateral: need token0/token1 = 1/price
-            // collateralValue in token0 = collateral / price
+            // token1 collateral, borrowing token0
+            // need inverse price
+            uint256 priceX96 = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) >> 96;
+            if (priceX96 == 0) priceX96 = 1;
             collateralValue = (uint256(collateralAmount) << 96) / priceX96;
         }
         
-        require(collateralValue > 0, "Zero collateral value");
+        if (collateralValue == 0) revert InitialLTVTooHigh();
         
-        // Calculate LTV in basis points
+        // Calculate LTV
         uint256 ltvBps = (uint256(debtAmount) * BPS) / collateralValue;
         
-        // Must be safely below LT
-        require(ltvBps < ltBps, "Initial LTV too high");
+        // FIXED: Must be safely below LT (add 5% buffer)
+        if (ltvBps >= ltBps - 500) revert InitialLTVTooHigh();
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -560,9 +407,6 @@ contract TrueLendRouter {
         revert InvalidToken();
     }
 
-    /**
-     * @notice Get pool information
-     */
     function getPoolInfo(address token) external view returns (
         uint128 totalDeposits,
         uint128 totalBorrows,
@@ -579,18 +423,12 @@ contract TrueLendRouter {
             (uint256(totalBorrows) * BPS) / totalDeposits : 0;
     }
 
-    /**
-     * @notice Get exchange rate (underlying per share)
-     */
     function getExchangeRate(address token) external view returns (uint256) {
         LendingPool storage pool = _getPool(token);
         if (pool.totalShares == 0) return PRECISION;
         return (uint256(pool.totalDeposits) * PRECISION) / pool.totalShares;
     }
 
-    /**
-     * @notice Get user's underlying token balance
-     */
     function getUserBalance(address token, address user) external view returns (uint256) {
         LendingPool storage pool = _getPool(token);
         uint256 userShares = shares[token][user];
@@ -598,16 +436,10 @@ contract TrueLendRouter {
         return (userShares * pool.totalDeposits) / pool.totalShares;
     }
 
-    /**
-     * @notice Get position details
-     */
     function getPosition(uint256 positionId) external view returns (BorrowPosition memory) {
         return positions[positionId];
     }
 
-    /**
-     * @notice Get current position debt with interest
-     */
     function getPositionDebt(uint256 positionId) public view returns (uint128) {
         BorrowPosition storage pos = positions[positionId];
         if (!pos.isActive) return 0;
@@ -619,60 +451,43 @@ contract TrueLendRouter {
         return uint128(pos.initialDebt + interest);
     }
 
-    /**
-     * @notice Get current price from pool (token1 per token0)
-     */
     function getCurrentPrice() external view returns (uint256 priceX96) {
         (, int24 tick, , ) = poolManager.getSlot0(poolKey.toId());
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
         priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
     }
 
-    /**
-     * @notice Calculate current LTV of a position
-     */
     function getPositionLTV(uint256 positionId) external view returns (uint256 ltvBps) {
         BorrowPosition storage pos = positions[positionId];
         if (!pos.isActive) return 0;
         
-        // Get current price
         (, int24 tick, , ) = poolManager.getSlot0(poolKey.toId());
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
         uint256 priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
         
-        // Get remaining collateral from Hook
         uint128 collateralInHook = hook.getPositionCollateral(positionId);
-        if (collateralInHook == 0) return BPS; // 100% LTV if no collateral
+        if (collateralInHook == 0) return BPS;
         
-        // Calculate collateral value
         uint256 collateralValue;
         if (pos.zeroForOne) {
             collateralValue = (uint256(collateralInHook) * priceX96) >> 96;
         } else {
+            if (priceX96 == 0) return BPS;
             collateralValue = (uint256(collateralInHook) << 96) / priceX96;
         }
         
         if (collateralValue == 0) return BPS;
         
-        // Get current debt with interest
         uint128 currentDebt = getPositionDebt(positionId);
-        
         ltvBps = (uint256(currentDebt) * BPS) / collateralValue;
     }
     
-    /**
-     * @notice Check if position is currently in liquidation range
-     */
     function isPositionUnderwater(uint256 positionId) external view returns (bool) {
         BorrowPosition storage pos = positions[positionId];
         if (!pos.isActive) return false;
-        
         return hook.isPositionInLiquidation(positionId);
     }
     
-    /**
-     * @notice Get comprehensive position status
-     */
     function getPositionStatus(uint256 positionId) external view returns (
         address owner,
         bool isActive,
@@ -690,7 +505,6 @@ contract TrueLendRouter {
         collateralRemaining = hook.getPositionCollateral(positionId);
         isUnderwater = hook.isPositionInLiquidation(positionId);
         
-        // Calculate LTV
         if (collateralRemaining > 0 && isActive) {
             (, int24 tick, , ) = poolManager.getSlot0(poolKey.toId());
             uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
@@ -700,7 +514,9 @@ contract TrueLendRouter {
             if (pos.zeroForOne) {
                 collateralValue = (uint256(collateralRemaining) * priceX96) >> 96;
             } else {
-                collateralValue = (uint256(collateralRemaining) << 96) / priceX96;
+                if (priceX96 > 0) {
+                    collateralValue = (uint256(collateralRemaining) << 96) / priceX96;
+                }
             }
             
             if (collateralValue > 0) {

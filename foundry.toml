@@ -15,5 +15,8 @@ ffi = true
 [lint]
 lint_on_build = false
 
+# Gas reporting
+[profile.gas_report]
+enabled = true
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
