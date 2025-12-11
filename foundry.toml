@@ -11,4 +11,9 @@ optimizer_runs = 800
 via_ir = false
 ffi = true
 
+# Ignore linting warnings
+[lint]
+lint_on_build = false
+
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

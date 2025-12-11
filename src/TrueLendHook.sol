@@ -93,7 +93,7 @@ interface ITrueLendRouter {
  *                              LIQUIDATION FLOW
  * ════════════════════════════════════════════════════════════════════════════════
  * 
- * 1. Swap occurs → beforeSwap() triggered
+ * 1. Swap occurs → _beforeSwap() triggered (internal hook implementation)
  * 2. Check current tick against position ranges (using bitmap)
  * 3. For positions in liquidation range:
  *    a. Calculate time underwater → penalty accrued
@@ -254,8 +254,8 @@ contract TrueLendHook is BaseHook {
         router = ITrueLendRouter(_router);
     }
 
-    function afterInitialize(address, PoolKey calldata key, uint160, int24)
-        external
+    function _afterInitialize(address, PoolKey calldata key, uint160, int24)
+        internal
         override
         returns (bytes4)
     {
@@ -394,7 +394,7 @@ contract TrueLendHook is BaseHook {
         uint128 debt,
         bool zeroForOne,
         uint16 ltBps
-    ) internal view returns (int24 tickLower, int24 tickUpper) {
+    ) internal pure returns (int24 tickLower, int24 tickUpper) {
         // Get current price
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(currentTick);
         uint256 priceX96 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
@@ -544,12 +544,12 @@ contract TrueLendHook is BaseHook {
     /**
      * @notice Before swap hook - detect and process liquidations
      */
-    function beforeSwap(
+    function _beforeSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata
-    ) external override returns (bytes4, BeforeSwapDelta, uint24) {
+    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
         // Get current tick
         (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
 
@@ -557,7 +557,7 @@ contract TrueLendHook is BaseHook {
         _processLiquidations(currentTick, params.zeroForOne, sender);
 
         // Return with no delta for now (simplified for MVP)
-        return (this.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+        return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
     }
 
     /**
@@ -619,21 +619,12 @@ contract TrueLendHook is BaseHook {
         uint128 collateralToLiquidate = uint128(targetLiquidated - alreadyLiquidated);
         if (collateralToLiquidate == 0) return;
 
-        // Calculate penalty to deduct
+        // Calculate and distribute penalties
         uint128 penaltyAmount = pos.accumulatedPenalty;
-        uint128 lpPenalty = (penaltyAmount * uint128(LP_PENALTY_SHARE_BPS)) / uint128(BPS);
-        uint128 swapperPenalty = (penaltyAmount * uint128(SWAPPER_PENALTY_SHARE_BPS)) / uint128(BPS);
-
-        // Deduct penalty from collateral
-        uint128 netCollateral = collateralToLiquidate > penaltyAmount 
-            ? collateralToLiquidate - penaltyAmount 
-            : 0;
+        _distributePenalties(pos, penaltyAmount, swapper);
 
         // Calculate proportional debt repaid
         uint128 debtRepaid = uint128((uint256(pos.debt) * collateralToLiquidate) / pos.initialCollateral);
-
-        // Distribute penalties
-        _distributePenalties(pos, lpPenalty, swapperPenalty, swapper);
 
         // Update position state
         pos.collateral = pos.collateral > collateralToLiquidate 
@@ -651,7 +642,7 @@ contract TrueLendHook is BaseHook {
             ? Currency.unwrap(poolKey.currency1)
             : Currency.unwrap(poolKey.currency0);
         
-        // For MVP: assume netCollateral was swapped to debtRepaid amount
+        // For MVP: assume collateral was swapped to debtRepaid amount
         // In production, would execute actual swap via pool
         if (debtRepaid > 0) {
             IERC20(debtToken).safeTransfer(address(router), debtRepaid);
@@ -762,13 +753,18 @@ contract TrueLendHook is BaseHook {
      */
     function _distributePenalties(
         Position storage pos,
-        uint128 lpPenalty,
-        uint128 swapperPenalty,
+        uint128 totalPenalty,
         address swapper
     ) internal {
+        if (totalPenalty == 0) return;
+        
         address collateralToken = pos.zeroForOne
             ? Currency.unwrap(poolKey.currency0)
             : Currency.unwrap(poolKey.currency1);
+
+        // Calculate splits
+        uint128 lpPenalty = (totalPenalty * uint128(LP_PENALTY_SHARE_BPS)) / uint128(BPS);
+        uint128 swapperPenalty = (totalPenalty * uint128(SWAPPER_PENALTY_SHARE_BPS)) / uint128(BPS);
 
         // Track LP penalties (for later claiming)
         totalLPPenalties += lpPenalty;
