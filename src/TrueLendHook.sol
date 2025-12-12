@@ -189,6 +189,7 @@ contract TrueLendHook is BaseHook {
                     ) {
                         pos.needsLiquidation = true;
                         pos.liquidationStartTime = block.timestamp;
+                        // FIX: Allow immediate first chunk execution
                         pos.lastLiquidationTime = block.timestamp - CHUNK_TIME_INTERVAL;
                     }
                 }
@@ -232,6 +233,7 @@ contract TrueLendHook is BaseHook {
         }
     }
 
+    // FIXED: Safe depth calculation with proper bounds checking
     function _calculateChunkSize(
         BorrowPosition storage pos,
         PoolKey calldata key,
@@ -247,16 +249,34 @@ contract TrueLendHook is BaseHook {
             CHUNK_TIME_INTERVAL;
         if (timeMultiplier > 50000) timeMultiplier = 50000;
 
+        // FIX: Only calculate depth when ACTUALLY in range with safe casting
         uint256 depthIntoRange = 0;
-        if (currentTick >= pos.tickLower) {
+        
+        // Verify we're actually in the liquidation range
+        if (currentTick >= pos.tickLower && currentTick <= pos.tickUpper) {
             int24 rangeWidth = pos.tickUpper - pos.tickLower;
+            
             if (rangeWidth > 0) {
+                // depthTicks is guaranteed non-negative since currentTick >= tickLower
                 int24 depthTicks = currentTick - pos.tickLower;
-                depthIntoRange =
-                    (uint256(uint24(depthTicks)) * 10000) /
-                    uint256(uint24(rangeWidth));
+                
+                // Additional safety check
+                if (depthTicks >= 0) {
+                    // Safe casting: depthTicks is non-negative
+                    uint256 depthTicksUint = uint256(int256(depthTicks));
+                    uint256 rangeWidthUint = uint256(int256(rangeWidth));
+                    
+                    // Bounds check before division
+                    if (depthTicksUint <= rangeWidthUint) {
+                        depthIntoRange = (depthTicksUint * 10000) / rangeWidthUint;
+                    } else {
+                        // If somehow beyond range, set to 100%
+                        depthIntoRange = 10000;
+                    }
+                }
             }
         }
+        // If not in range, depthIntoRange stays 0
 
         uint128 poolLiquidity = poolManager.getLiquidity(key.toId());
         uint256 positionLiquidityEquiv = pos.collateralRemaining;
@@ -390,6 +410,9 @@ contract TrueLendHook is BaseHook {
         uint256 /* collateralLiquidated */,
         uint256 ethReceived
     ) internal view returns (uint256) {
+        // FIX: Add safety check for zero ethReceived
+        if (ethReceived == 0) return 0;
+        
         uint256 ltFactor = (uint256(pos.liquidationThreshold) * 10000) / 100;
         uint256 timeInLiquidation = block.timestamp - pos.liquidationStartTime;
         uint256 timeFactor = 10000 + (timeInLiquidation * 100) / 1 hours;
@@ -580,6 +603,7 @@ contract TrueLendHook is BaseHook {
         }
     }
 
+    // FIX: Added bounds checking for overflow prevention
     function _estimateNewTick(
         PoolKey calldata key,
         SwapParams calldata params,
@@ -592,12 +616,18 @@ contract TrueLendHook is BaseHook {
         uint128 liquidity = poolManager.getLiquidity(key.toId());
         if (liquidity == 0) return currentTick;
 
-        int24 estimatedMove = int24(
-            params.amountSpecified / int256(uint256(liquidity)) / 1000
-        );
+        // FIX: Safe calculation with bounds checking
+        // Break down to avoid overflow: divide first, then convert to int24
+        int256 rawMove = params.amountSpecified / int256(uint256(liquidity));
         
-        if (estimatedMove > 10000) estimatedMove = 10000;
-        if (estimatedMove < -10000) estimatedMove = -10000;
+        // Scale down and clamp to int24 range before casting
+        int256 scaledMove = rawMove / 1000;
+        
+        // Clamp to safe int24 range
+        if (scaledMove > 10000) scaledMove = 10000;
+        if (scaledMove < -10000) scaledMove = -10000;
+        
+        int24 estimatedMove = int24(scaledMove);
         
         int24 newTick = params.zeroForOne
             ? currentTick - estimatedMove
@@ -632,3 +662,5 @@ contract TrueLendHook is BaseHook {
         return activePositions[key.toId()];
     }
 }
+
+
