@@ -189,7 +189,6 @@ contract TrueLendHook is BaseHook {
                     ) {
                         pos.needsLiquidation = true;
                         pos.liquidationStartTime = block.timestamp;
-                        // FIX: Allow immediate first chunk execution
                         pos.lastLiquidationTime = block.timestamp - CHUNK_TIME_INTERVAL;
                     }
                 }
@@ -233,7 +232,6 @@ contract TrueLendHook is BaseHook {
         }
     }
 
-    // FIXED: Safe depth calculation with proper bounds checking
     function _calculateChunkSize(
         BorrowPosition storage pos,
         PoolKey calldata key,
@@ -249,34 +247,26 @@ contract TrueLendHook is BaseHook {
             CHUNK_TIME_INTERVAL;
         if (timeMultiplier > 50000) timeMultiplier = 50000;
 
-        // FIX: Only calculate depth when ACTUALLY in range with safe casting
         uint256 depthIntoRange = 0;
         
-        // Verify we're actually in the liquidation range
         if (currentTick >= pos.tickLower && currentTick <= pos.tickUpper) {
             int24 rangeWidth = pos.tickUpper - pos.tickLower;
             
             if (rangeWidth > 0) {
-                // depthTicks is guaranteed non-negative since currentTick >= tickLower
                 int24 depthTicks = currentTick - pos.tickLower;
                 
-                // Additional safety check
                 if (depthTicks >= 0) {
-                    // Safe casting: depthTicks is non-negative
                     uint256 depthTicksUint = uint256(int256(depthTicks));
                     uint256 rangeWidthUint = uint256(int256(rangeWidth));
                     
-                    // Bounds check before division
                     if (depthTicksUint <= rangeWidthUint) {
                         depthIntoRange = (depthTicksUint * 10000) / rangeWidthUint;
                     } else {
-                        // If somehow beyond range, set to 100%
                         depthIntoRange = 10000;
                     }
                 }
             }
         }
-        // If not in range, depthIntoRange stays 0
 
         uint128 poolLiquidity = poolManager.getLiquidity(key.toId());
         uint256 positionLiquidityEquiv = pos.collateralRemaining;
@@ -322,13 +312,11 @@ contract TrueLendHook is BaseHook {
         );
         BorrowPosition storage pos = positions[swapData.positionId];
 
-        // Approve PoolManager to take tokens
         IERC20(Currency.unwrap(swapData.poolKey.currency1)).approve(
             address(poolManager),
             swapData.amount
         );
 
-        // Settle borrower's USDC collateral to PoolManager
         swapData.poolKey.currency1.settle(
             poolManager,
             address(this),
@@ -336,7 +324,6 @@ contract TrueLendHook is BaseHook {
             false
         );
 
-        // Execute swap: USDC → ETH
         BalanceDelta swapDelta = poolManager.swap(
             swapData.poolKey,
             SwapParams({
@@ -347,7 +334,6 @@ contract TrueLendHook is BaseHook {
             ""
         );
 
-        // Take the ETH we received from the swap
         uint256 ethReceived = uint256(uint128(-swapDelta.amount0()));
         swapData.poolKey.currency0.take(
             poolManager,
@@ -356,12 +342,9 @@ contract TrueLendHook is BaseHook {
             false
         );
 
-        // Calculate penalty
         uint256 penalty = _calculatePenalty(pos, swapData.amount, ethReceived);
 
-        // Donate penalty to LPs
         if (penalty > 0 && penalty < ethReceived) {
-            // Approve for donation
             IERC20(Currency.unwrap(swapData.poolKey.currency0)).approve(
                 address(poolManager),
                 penalty
@@ -374,7 +357,6 @@ contract TrueLendHook is BaseHook {
                 ""
             );
 
-            // Settle the penalty donation
             swapData.poolKey.currency0.settle(
                 poolManager,
                 address(this),
@@ -385,7 +367,6 @@ contract TrueLendHook is BaseHook {
             ethReceived -= penalty;
         }
 
-        // Update position
         pos.collateralRemaining -= swapData.amount;
         pos.debtRepaid += ethReceived;
         pos.lastLiquidationTime = block.timestamp;
@@ -410,7 +391,6 @@ contract TrueLendHook is BaseHook {
         uint256 /* collateralLiquidated */,
         uint256 ethReceived
     ) internal view returns (uint256) {
-        // FIX: Add safety check for zero ethReceived
         if (ethReceived == 0) return 0;
         
         uint256 ltFactor = (uint256(pos.liquidationThreshold) * 10000) / 100;
@@ -492,7 +472,6 @@ contract TrueLendHook is BaseHook {
             )
         );
 
-        // Transfer collateral from router to hook
         require(
             IERC20(Currency.unwrap(key.currency1)).transferFrom(
                 msg.sender,
@@ -530,7 +509,6 @@ contract TrueLendHook is BaseHook {
             tickHasPositions[key.toId()][tickLower] = true;
         }
 
-        // Send borrowed tokens to borrower
         require(
             IERC20(Currency.unwrap(key.currency0)).transfer(borrower, debtAmount),
             "Debt transfer failed"
@@ -603,40 +581,60 @@ contract TrueLendHook is BaseHook {
         }
     }
 
-    // FIX: Added bounds checking for overflow prevention
+    // FIXED: Proper tick estimation based on swap amount, not price limit
     function _estimateNewTick(
         PoolKey calldata key,
         SwapParams calldata params,
         int24 currentTick
     ) internal view returns (int24) {
-        if (params.sqrtPriceLimitX96 != 0) {
-            return TickMath.getTickAtSqrtPrice(params.sqrtPriceLimitX96);
-        }
-
         uint128 liquidity = poolManager.getLiquidity(key.toId());
         if (liquidity == 0) return currentTick;
 
-        // FIX: Safe calculation with bounds checking
-        // Break down to avoid overflow: divide first, then convert to int24
-        int256 rawMove = params.amountSpecified / int256(uint256(liquidity));
+        int256 amount = params.amountSpecified;
+        if (amount == 0) return currentTick;
         
-        // Scale down and clamp to int24 range before casting
-        int256 scaledMove = rawMove / 1000;
+        // Rough approximation: tick moves proportionally to amount/liquidity
+        // For small swaps: Δsqrt(P) ≈ Δamount / L
+        // And Δtick ≈ Δsqrt(P) / sqrt(P) * constant
+        // Simplified: every 1% of pool liquidity moved ≈ ~1000 ticks (very rough)
         
-        // Clamp to safe int24 range
-        if (scaledMove > 10000) scaledMove = 10000;
-        if (scaledMove < -10000) scaledMove = -10000;
+        int256 liquidityInt = int256(uint256(liquidity));
         
-        int24 estimatedMove = int24(scaledMove);
+        // Calculate basis points (amount * 10000 / liquidity)
+        int256 bps = (amount * 10000) / liquidityInt;
         
-        int24 newTick = params.zeroForOne
-            ? currentTick - estimatedMove
+        // Convert to approximate tick movement
+        // 100 bps (1%) ≈ 1000 ticks, so 1 bps ≈ 10 ticks
+        int256 estimatedMoveInt = bps * 10;
+        
+        // Cap the estimate to reasonable bounds
+        if (estimatedMoveInt > 100000) estimatedMoveInt = 100000;
+        if (estimatedMoveInt < -100000) estimatedMoveInt = -100000;
+        
+        int24 estimatedMove = int24(estimatedMoveInt);
+        
+        // Apply direction
+        int24 estimatedTick = params.zeroForOne 
+            ? currentTick - estimatedMove 
             : currentTick + estimatedMove;
-            
-        if (newTick > TickMath.MAX_TICK) newTick = TickMath.MAX_TICK;
-        if (newTick < TickMath.MIN_TICK) newTick = TickMath.MIN_TICK;
         
-        return newTick;
+        // Clamp to valid tick range
+        if (estimatedTick > TickMath.MAX_TICK) estimatedTick = TickMath.MAX_TICK;
+        if (estimatedTick < TickMath.MIN_TICK) estimatedTick = TickMath.MIN_TICK;
+        
+        // If there's a price limit, don't exceed it (but don't use it as the estimate)
+        if (params.sqrtPriceLimitX96 != 0) {
+            int24 limitTick = TickMath.getTickAtSqrtPrice(params.sqrtPriceLimitX96);
+            if (params.zeroForOne) {
+                // Price decreasing, tick decreasing
+                if (estimatedTick < limitTick) estimatedTick = limitTick;
+            } else {
+                // Price increasing, tick increasing  
+                if (estimatedTick > limitTick) estimatedTick = limitTick;
+            }
+        }
+        
+        return estimatedTick;
     }
 
     function _calculateTotalDebt(
@@ -662,5 +660,3 @@ contract TrueLendHook is BaseHook {
         return activePositions[key.toId()];
     }
 }
-
-
