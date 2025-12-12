@@ -13,18 +13,19 @@ import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
-import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
+import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 /**
  * @title TrueLend Oracleless Liquidation Hook
  * @notice AMM-native lending with TWAMM-style gradual liquidations
- * @dev MVP: Simplified token handling for hackathon demo
  */
 contract TrueLendHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using CurrencyLibrary for Currency;
+    using CurrencySettler for Currency;
     using FixedPointMathLib for uint256;
 
     error OnlyLendingRouter();
@@ -296,7 +297,6 @@ contract TrueLendHook is BaseHook {
 
     /**
      * @notice Unlock callback - executes liquidation swap
-     * @dev MVP: Simplified for hackathon - assumes hook has collateral
      */
     function unlockCallback(
         bytes calldata data
@@ -307,15 +307,13 @@ contract TrueLendHook is BaseHook {
         );
         BorrowPosition storage pos = positions[swapData.positionId];
 
-        // MVP: Hook should have collateral from createPosition()
-        // Approve PoolManager to take collateral for the swap
-        address token1Address = Currency.unwrap(swapData.poolKey.currency1);
-        IERC20(token1Address).approve(address(poolManager), swapData.amount);
-
-        // Transfer collateral to PoolManager (settle)
-        poolManager.sync(swapData.poolKey.currency1);
-        poolManager.settle();
-        IERC20(token1Address).transfer(address(poolManager), swapData.amount);
+        // Settle borrower's USDC collateral to PoolManager
+        swapData.poolKey.currency1.settle(
+            poolManager,
+            address(this),
+            swapData.amount,
+            false
+        );
 
         // Execute swap: USDC → ETH
         BalanceDelta swapDelta = poolManager.swap(
@@ -328,16 +326,13 @@ contract TrueLendHook is BaseHook {
             ""
         );
 
-        // Calculate how much ETH we got
-        // In a zeroForOne=false swap, amount0 is negative (we get token0)
-        uint256 ethReceived = uint256(int256(-swapDelta.amount0()));
-
-        // Take the ETH from PoolManager
-        poolManager.sync(swapData.poolKey.currency0);
-        poolManager.take(
-            swapData.poolKey.currency0,
+        // Take the ETH we received from the swap
+        uint256 ethReceived = uint256(uint128(-swapDelta.amount0()));
+        swapData.poolKey.currency0.take(
+            poolManager,
             address(this),
-            ethReceived
+            ethReceived,
+            false
         );
 
         // Calculate penalty
@@ -345,13 +340,20 @@ contract TrueLendHook is BaseHook {
 
         // Donate penalty to LPs
         if (penalty > 0 && penalty < ethReceived) {
-            address token0Address = Currency.unwrap(swapData.poolKey.currency0);
-            IERC20(token0Address).approve(address(poolManager), penalty);
+            poolManager.donate(
+                swapData.poolKey,
+                penalty,
+                0,
+                ""
+            );
 
-            IERC20(token0Address).transfer(address(poolManager), penalty);
-            poolManager.sync(swapData.poolKey.currency0);
-            
-            poolManager.donate(swapData.poolKey, penalty, 0, "");
+            // Settle the penalty donation
+            swapData.poolKey.currency0.settle(
+                poolManager,
+                address(this),
+                penalty,
+                false
+            );
 
             ethReceived -= penalty;
         }
@@ -429,7 +431,6 @@ contract TrueLendHook is BaseHook {
 
     /**
      * @notice Create borrow position
-     * @dev MVP: Router should transfer collateral before calling this
      */
     function createPosition(
         PoolKey calldata key,
@@ -464,11 +465,14 @@ contract TrueLendHook is BaseHook {
             )
         );
 
-        // MVP: Transfer collateral from router to hook
-        IERC20(Currency.unwrap(key.currency1)).transferFrom(
-            msg.sender,
-            address(this),
-            collateralAmount
+        // Transfer collateral from router to hook
+        require(
+            IERC20(Currency.unwrap(key.currency1)).transferFrom(
+                msg.sender,
+                address(this),
+                collateralAmount
+            ),
+            "Collateral transfer failed"
         );
 
         positions[positionId] = BorrowPosition({
@@ -499,8 +503,11 @@ contract TrueLendHook is BaseHook {
             tickHasPositions[key.toId()][tickLower] = true;
         }
 
-        // MVP: Send borrowed tokens to borrower
-        IERC20(Currency.unwrap(key.currency0)).transfer(borrower, debtAmount);
+        // Send borrowed tokens to borrower
+        require(
+            IERC20(Currency.unwrap(key.currency0)).transfer(borrower, debtAmount),
+            "Debt transfer failed"
+        );
 
         emit PositionCreated(
             positionId,

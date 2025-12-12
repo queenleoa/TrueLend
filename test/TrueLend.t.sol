@@ -2,16 +2,15 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import "forge-std/console.sol";
+import {console} from "forge-std/console.sol";
 
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
-import {PoolManager} from "v4-core/PoolManager.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
@@ -36,8 +35,6 @@ contract TrueLendTest is Test, Deployers {
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     
-    // We'll start at 1:1 and use swaps to move price to desired levels
-    
     function setUp() public {
         // Deploy v4-core contracts
         deployFreshManagerAndRouters();
@@ -57,7 +54,7 @@ contract TrueLendTest is Test, Deployers {
         );
         address hookAddress = address(flags);
         
-        // Use deployCodeTo to deploy to the flag address (for testing)
+        // Use deployCodeTo to deploy to the flag address
         deployCodeTo("TrueLendHook.sol", abi.encode(address(manager)), hookAddress);
         hook = TrueLendHook(hookAddress);
         
@@ -71,13 +68,12 @@ contract TrueLendTest is Test, Deployers {
         poolKey = PoolKey({
             currency0: Currency.wrap(address(token0)),
             currency1: Currency.wrap(address(token1)),
-            fee: 3000, // 0.3%
+            fee: 3000,
             tickSpacing: 60,
             hooks: hook
         });
         
-        // Initialize pool at 1:1 price for simplicity
-        // We can adjust price through swaps later if needed
+        // Initialize pool at 1:1 price
         manager.initialize(poolKey, SQRT_PRICE_1_1);
         
         // Add liquidity for testing
@@ -89,17 +85,20 @@ contract TrueLendTest is Test, Deployers {
         token0.mint(bob, 100 ether);
         token1.mint(bob, 1_000_000e18);
         
-        // Approve hook for alice and bob
+        // FIX: Fund hook with borrowable ETH
+        token0.mint(address(hook), 100 ether);
+        
+        // FIX: Approve router (not hook directly) for alice and bob
         vm.startPrank(alice);
-        token0.approve(address(hook), type(uint256).max);
-        token1.approve(address(hook), type(uint256).max);
+        token0.approve(address(router), type(uint256).max);
+        token1.approve(address(router), type(uint256).max);
         token0.approve(address(swapRouter), type(uint256).max);
         token1.approve(address(swapRouter), type(uint256).max);
         vm.stopPrank();
         
         vm.startPrank(bob);
-        token0.approve(address(hook), type(uint256).max);
-        token1.approve(address(hook), type(uint256).max);
+        token0.approve(address(router), type(uint256).max);
+        token1.approve(address(router), type(uint256).max);
         token0.approve(address(swapRouter), type(uint256).max);
         token1.approve(address(swapRouter), type(uint256).max);
         vm.stopPrank();
@@ -108,22 +107,20 @@ contract TrueLendTest is Test, Deployers {
     function _addLiquidity() internal {
         // Add wide range liquidity for testing
         token0.mint(address(this), 100 ether);
-        token1.mint(address(this), 100 ether); // Match token0 for 1:1 ratio
+        token1.mint(address(this), 100 ether);
         
         token0.approve(address(modifyLiquidityRouter), type(uint256).max);
         token1.approve(address(modifyLiquidityRouter), type(uint256).max);
         
-        // Use a much smaller tick range to avoid extreme liquidity calculations
-        int24 tickLower = -600; // ~0.95x to ~1.05x price range
+        int24 tickLower = -600;
         int24 tickUpper = 600;
         
-        // Much smaller liquidity delta that's proportional to token amounts
         modifyLiquidityRouter.modifyLiquidity(
             poolKey,
             ModifyLiquidityParams({
                 tickLower: tickLower,
                 tickUpper: tickUpper,
-                liquidityDelta: 10 ether, // Reasonable amount for 100 ether tokens
+                liquidityDelta: 10 ether,
                 salt: bytes32(0)
             }),
             ""
@@ -131,12 +128,10 @@ contract TrueLendTest is Test, Deployers {
     }
     
     /// @notice Test 1: No liquidation when price stays below threshold
-    /// Starting at 1:1, small swaps keep price below liquidation threshold
     function test_NoLiquidation_PriceBelowThreshold() public {
         vm.startPrank(alice);
         
         // Create position: Borrow 1 ETH against 4000 USDC at 90% LT
-        // Liquidation starts when collateral value < 90% of debt value
         bytes32 positionId = router.borrow(
             poolKey,
             4000e18, // collateral USDC
@@ -151,15 +146,14 @@ contract TrueLendTest is Test, Deployers {
         
         vm.stopPrank();
         
-        // Execute small swap as Bob (price remains safe)
+        // Execute small swap as Bob
         vm.startPrank(bob);
         
-        // Small swap: buy some ETH with USDC
         swapRouter.swap(
             poolKey,
             SwapParams({
-                zeroForOne: false, // USDC → ETH (buying ETH)
-                amountSpecified: -1000e18, // Exact input: 1000 USDC
+                zeroForOne: false,
+                amountSpecified: -1000e18,
                 sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
             }),
             PoolSwapTest.TestSettings({
@@ -174,7 +168,6 @@ contract TrueLendTest is Test, Deployers {
         // Check position after swap
         TrueLendHook.BorrowPosition memory posAfter = hook.getPosition(positionId);
         
-        // Assertions
         assertEq(posAfter.collateralRemaining, 4000e18, "Collateral should be untouched");
         assertEq(posAfter.debtRepaid, 0, "No debt should be repaid");
         assertEq(posAfter.isActive, true, "Position should still be active");
@@ -184,16 +177,14 @@ contract TrueLendTest is Test, Deployers {
     }
     
     /// @notice Test 2: Partial liquidation when price enters liquidation range
-    /// Larger swaps push price into liquidation territory, incremental liquidation occurs
     function test_PartialLiquidation_PriceEntersRange() public {
         vm.startPrank(alice);
         
-        // Create position: same as test 1
         bytes32 positionId = router.borrow(
             poolKey,
-            4000e18, // collateral USDC
-            1 ether,  // debt ETH
-            90        // 90% LT
+            4000e18,
+            1 ether,
+            90
         );
         
         vm.stopPrank();
@@ -201,12 +192,11 @@ contract TrueLendTest is Test, Deployers {
         // Execute swap that pushes into liquidation range
         vm.startPrank(bob);
         
-        // Larger swap to trigger liquidation
         swapRouter.swap(
             poolKey,
             SwapParams({
-                zeroForOne: false, // USDC → ETH
-                amountSpecified: -5000e18, // 5000 USDC
+                zeroForOne: false,
+                amountSpecified: -5000e18,
                 sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
             }),
             PoolSwapTest.TestSettings({
@@ -216,14 +206,12 @@ contract TrueLendTest is Test, Deployers {
             ""
         );
         
-        // Check position after first swap
         TrueLendHook.BorrowPosition memory pos1 = hook.getPosition(positionId);
         assertEq(pos1.needsLiquidation, true, "Should be marked for liquidation");
         
         uint256 collateralAfterFirst = pos1.collateralRemaining;
         uint256 debtRepaidAfterFirst = pos1.debtRepaid;
         
-        // Some liquidation should have occurred
         assertLt(collateralAfterFirst, 4000e18, "Some collateral should be liquidated");
         assertGt(debtRepaidAfterFirst, 0, "Some debt should be repaid");
         
@@ -231,15 +219,15 @@ contract TrueLendTest is Test, Deployers {
         console.log("  Collateral remaining:", collateralAfterFirst);
         console.log("  Debt repaid:", debtRepaidAfterFirst);
         
-        // Wait 1 minute (for time-based chunk calculation)
+        // Wait 1 minute for time-based chunk calculation
         vm.warp(block.timestamp + 61);
         
-        // Execute another swap to trigger more liquidation
+        // Execute another swap
         swapRouter.swap(
             poolKey,
             SwapParams({
                 zeroForOne: false,
-                amountSpecified: -1000e18, // Another 1000 USDC
+                amountSpecified: -1000e18,
                 sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
             }),
             PoolSwapTest.TestSettings({
@@ -251,10 +239,8 @@ contract TrueLendTest is Test, Deployers {
         
         vm.stopPrank();
         
-        // Check position after second swap
         TrueLendHook.BorrowPosition memory pos2 = hook.getPosition(positionId);
         
-        // More liquidation should have occurred
         assertLt(pos2.collateralRemaining, collateralAfterFirst, "More collateral liquidated");
         assertGt(pos2.debtRepaid, debtRepaidAfterFirst, "More debt repaid");
         assertEq(pos2.isActive, true, "Position should still be active");
@@ -266,16 +252,14 @@ contract TrueLendTest is Test, Deployers {
     }
     
     /// @notice Test 3: Full liquidation when price moves through entire range
-    /// Multiple swaps push price high enough to liquidate all collateral
     function test_FullLiquidation_PriceThroughRange() public {
         vm.startPrank(alice);
         
-        // Create position
         bytes32 positionId = router.borrow(
             poolKey,
-            4000e18, // collateral USDC
-            1 ether,  // debt ETH
-            90        // 90% LT
+            4000e18,
+            1 ether,
+            90
         );
         
         vm.stopPrank();
@@ -284,12 +268,11 @@ contract TrueLendTest is Test, Deployers {
         
         // Execute multiple swaps to move price through entire liquidation range
         for (uint i = 0; i < 5; i++) {
-            // Large swap
             swapRouter.swap(
                 poolKey,
                 SwapParams({
                     zeroForOne: false,
-                    amountSpecified: -10000e18, // 10k USDC per swap
+                    amountSpecified: -10000e18,
                     sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
                 }),
                 PoolSwapTest.TestSettings({
@@ -299,10 +282,8 @@ contract TrueLendTest is Test, Deployers {
                 ""
             );
             
-            // Wait between swaps for time-based chunks
             vm.warp(block.timestamp + 61);
             
-            // Check if fully liquidated
             TrueLendHook.BorrowPosition memory pos = hook.getPosition(positionId);
             console.log("After swap", i + 1);
             console.log("  Collateral remaining:", pos.collateralRemaining);
@@ -317,10 +298,8 @@ contract TrueLendTest is Test, Deployers {
         
         vm.stopPrank();
         
-        // Final position check
         TrueLendHook.BorrowPosition memory finalPos = hook.getPosition(positionId);
         
-        // Position should be fully liquidated
         assertEq(finalPos.collateralRemaining, 0, "All collateral should be liquidated");
         assertEq(finalPos.isActive, false, "Position should be closed");
         assertGt(finalPos.debtRepaid, 0, "Debt should be substantially repaid");
@@ -329,12 +308,5 @@ contract TrueLendTest is Test, Deployers {
         console.log("  Total collateral liquidated:", finalPos.collateralAmount);
         console.log("  Total debt repaid:", finalPos.debtRepaid);
         console.log("Test 3 Passed: Full liquidation completed");
-    }
-    
-    /// @notice Helper to get current pool price
-    function _getCurrentPrice() internal view returns (uint256) {
-        (uint160 sqrtPriceX96,,,) = manager.getSlot0(poolKey.toId());
-        // price = (sqrtPriceX96 / 2^96)^2
-        return uint256(sqrtPriceX96) * uint256(sqrtPriceX96) / (1 << 192);
     }
 }

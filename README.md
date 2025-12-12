@@ -16,8 +16,8 @@ TrueLend eliminates oracles entirely by embedding liquidation logic directly int
 Instead of external oracles, TrueLend uses:
 - **Tick Movement** : Price is defined by AMM tick position
 - **Gradual Liquidation**: TWAMM-style incremental swaps replace binary liquidations
--**Reversible Process**: If price moves back, liquidation pauses/reverses
--**Higher LTs**: Support liquidation thresholds up to 99
+- **Reversible Process**: If price moves back, liquidation pauses/reverses
+- **Higher LTs**: Support liquidation thresholds up to 99
 
 
 ## Architecture

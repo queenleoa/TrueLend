@@ -9,10 +9,9 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 /**
  * @title TrueLendRouter
  * @notice Router for creating and managing borrow positions
- * @dev MVP: Simplified for hackathon demo
  */
 contract TrueLendRouter {
-    TrueLendHook public immutable hook;
+    TrueLendHook public immutable HOOK;
     
     event LoanCreated(
         address indexed borrower,
@@ -28,7 +27,7 @@ contract TrueLendRouter {
     );
 
     constructor(address _hook) {
-        hook = TrueLendHook(_hook);
+        HOOK = TrueLendHook(_hook);
     }
 
     /**
@@ -52,10 +51,10 @@ contract TrueLendRouter {
         );
         
         // Approve hook to pull collateral
-        collateralToken.approve(address(hook), collateralAmount);
+        collateralToken.approve(address(HOOK), collateralAmount);
         
         // Create position (hook will pull collateral and send borrowed tokens)
-        positionId = hook.createPosition(
+        positionId = HOOK.createPosition(
             key,
             msg.sender,
             collateralAmount,
@@ -75,7 +74,7 @@ contract TrueLendRouter {
         uint256 collateralRemaining,
         uint256 debtRepaid
     ) {
-        TrueLendHook.BorrowPosition memory pos = hook.getPosition(positionId);
+        TrueLendHook.BorrowPosition memory pos = HOOK.getPosition(positionId);
         return (
             pos.isActive,
             pos.needsLiquidation,
