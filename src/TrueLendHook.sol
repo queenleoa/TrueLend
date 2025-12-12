@@ -147,9 +147,7 @@ contract TrueLendHook is BaseHook {
         SwapParams calldata params,
         bytes calldata
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        (uint160 sqrtPriceX96, int24 currentTick, , ) = poolManager.getSlot0(
-            key.toId()
-        );
+        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
 
         int24 estimatedNewTick = _estimateNewTick(key, params, currentTick);
         _checkAndActivateLiquidations(key, currentTick, estimatedNewTick);
@@ -191,7 +189,7 @@ contract TrueLendHook is BaseHook {
                     ) {
                         pos.needsLiquidation = true;
                         pos.liquidationStartTime = block.timestamp;
-                        pos.lastLiquidationTime = block.timestamp;
+                        pos.lastLiquidationTime = block.timestamp - CHUNK_TIME_INTERVAL;
                     }
                 }
             }
@@ -218,9 +216,7 @@ contract TrueLendHook is BaseHook {
     function _executeLiquidationChunks(PoolKey calldata key) internal {
         PoolId poolId = key.toId();
         bytes32[] memory activePos = activePositions[poolId];
-        (uint160 sqrtPriceX96, int24 currentTick, , ) = poolManager.getSlot0(
-            poolId
-        );
+        (, int24 currentTick, , ) = poolManager.getSlot0(poolId);
 
         for (uint i = 0; i < activePos.length; i++) {
             BorrowPosition storage pos = positions[activePos[i]];
@@ -254,10 +250,12 @@ contract TrueLendHook is BaseHook {
         uint256 depthIntoRange = 0;
         if (currentTick >= pos.tickLower) {
             int24 rangeWidth = pos.tickUpper - pos.tickLower;
-            int24 depthTicks = currentTick - pos.tickLower;
-            depthIntoRange =
-                (uint256(uint24(depthTicks)) * 10000) /
-                uint256(uint24(rangeWidth));
+            if (rangeWidth > 0) {
+                int24 depthTicks = currentTick - pos.tickLower;
+                depthIntoRange =
+                    (uint256(uint24(depthTicks)) * 10000) /
+                    uint256(uint24(rangeWidth));
+            }
         }
 
         uint128 poolLiquidity = poolManager.getLiquidity(key.toId());
@@ -295,9 +293,6 @@ contract TrueLendHook is BaseHook {
         );
     }
 
-    /**
-     * @notice Unlock callback - executes liquidation swap
-     */
     function unlockCallback(
         bytes calldata data
     ) external onlyPoolManager returns (bytes memory) {
@@ -306,6 +301,12 @@ contract TrueLendHook is BaseHook {
             (LiquidationSwapData)
         );
         BorrowPosition storage pos = positions[swapData.positionId];
+
+        // Approve PoolManager to take tokens
+        IERC20(Currency.unwrap(swapData.poolKey.currency1)).approve(
+            address(poolManager),
+            swapData.amount
+        );
 
         // Settle borrower's USDC collateral to PoolManager
         swapData.poolKey.currency1.settle(
@@ -340,6 +341,12 @@ contract TrueLendHook is BaseHook {
 
         // Donate penalty to LPs
         if (penalty > 0 && penalty < ethReceived) {
+            // Approve for donation
+            IERC20(Currency.unwrap(swapData.poolKey.currency0)).approve(
+                address(poolManager),
+                penalty
+            );
+            
             poolManager.donate(
                 swapData.poolKey,
                 penalty,
@@ -380,7 +387,7 @@ contract TrueLendHook is BaseHook {
 
     function _calculatePenalty(
         BorrowPosition storage pos,
-        uint256 collateralLiquidated,
+        uint256 /* collateralLiquidated */,
         uint256 ethReceived
     ) internal view returns (uint256) {
         uint256 ltFactor = (uint256(pos.liquidationThreshold) * 10000) / 100;
@@ -397,7 +404,7 @@ contract TrueLendHook is BaseHook {
     }
 
     function _checkPositionStatus(
-        PoolKey calldata /*key*/,
+        PoolKey calldata /* key */,
         bytes32 positionId
     ) internal {
         BorrowPosition storage pos = positions[positionId];
@@ -429,9 +436,6 @@ contract TrueLendHook is BaseHook {
         }
     }
 
-    /**
-     * @notice Create borrow position
-     */
     function createPosition(
         PoolKey calldata key,
         address borrower,
@@ -521,7 +525,7 @@ contract TrueLendHook is BaseHook {
     }
 
     function repayDebt(
-        PoolKey calldata key,
+        PoolKey calldata /* key */,
         bytes32 positionId,
         uint256 repayAmount
     ) external {
@@ -543,17 +547,11 @@ contract TrueLendHook is BaseHook {
 
     function _calculateLiquidationTicks(
         uint160 sqrtPriceX96Current,
-        int24 currentTick,
+        int24 /* currentTick */,
         uint8 liquidationThreshold,
         uint256 collateralAmount,
         uint256 debtAmount
     ) internal pure returns (int24 tickLower, int24 tickUpper) {
-        uint256 currentPrice = FullMath.mulDiv(
-            uint256(sqrtPriceX96Current),
-            uint256(sqrtPriceX96Current),
-            1 << 192
-        );
-
         uint256 liquidationPrice = FullMath.mulDiv(
             uint256(liquidationThreshold) * collateralAmount,
             1,
@@ -575,6 +573,11 @@ contract TrueLendHook is BaseHook {
         if (tickUpper > TickMath.MAX_TICK) tickUpper = TickMath.MAX_TICK;
         if (tickLower < TickMath.MIN_TICK) tickLower = TickMath.MIN_TICK;
         if (tickUpper < TickMath.MIN_TICK) tickUpper = TickMath.MIN_TICK;
+        
+        if (tickUpper <= tickLower) {
+            tickUpper = tickLower + 600;
+            if (tickUpper > TickMath.MAX_TICK) tickUpper = TickMath.MAX_TICK;
+        }
     }
 
     function _estimateNewTick(
@@ -592,10 +595,18 @@ contract TrueLendHook is BaseHook {
         int24 estimatedMove = int24(
             params.amountSpecified / int256(uint256(liquidity)) / 1000
         );
-        return
-            params.zeroForOne
-                ? currentTick - estimatedMove
-                : currentTick + estimatedMove;
+        
+        if (estimatedMove > 10000) estimatedMove = 10000;
+        if (estimatedMove < -10000) estimatedMove = -10000;
+        
+        int24 newTick = params.zeroForOne
+            ? currentTick - estimatedMove
+            : currentTick + estimatedMove;
+            
+        if (newTick > TickMath.MAX_TICK) newTick = TickMath.MAX_TICK;
+        if (newTick < TickMath.MIN_TICK) newTick = TickMath.MIN_TICK;
+        
+        return newTick;
     }
 
     function _calculateTotalDebt(
