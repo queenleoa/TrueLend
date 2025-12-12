@@ -1,260 +1,76 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Currency} from "v4-core/types/Currency.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {TrueLendHook} from "./TrueLendHook.sol";
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 /**
- * @title DummyRouter
- * @notice Simple router for testing TrueLendHook with proper inverse range order support
- * 
- * This router manages user interactions with the lending hook:
- * - Opens positions by transferring collateral and calling hook
- * - Receives liquidation callbacks from hook
- * - Handles collateral withdrawals
- * - Tracks liquidation progress (initial liquidity vs remaining)
+ * @title DummyLendingRouter
+ * @notice Simplified router for creating and managing borrow positions
+ * @dev In production, this would handle lending pool management, interest accrual, etc.
  */
-contract DummyRouter {
-    using SafeERC20 for IERC20;
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                              STATE
-    // ════════════════════════════════════════════════════════════════════════════
-
+contract DummyLendingRouter {
     TrueLendHook public immutable hook;
     
-    // Track debt repayments from liquidations
-    mapping(uint256 => uint128) public totalDebtRepaid;
-    mapping(uint256 => bool) public positionFullyLiquidated;
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                              EVENTS
-    // ════════════════════════════════════════════════════════════════════════════
-
-    event PositionOpened(
-        uint256 indexed positionId,
-        address indexed user,
-        address collateralToken,
-        address debtToken,
-        uint128 collateral,
-        uint128 debt
+    event LoanCreated(
+        address indexed borrower,
+        bytes32 indexed positionId,
+        uint256 collateralAmount,
+        uint256 borrowAmount
     );
     
-    event LiquidationReceived(
-        uint256 indexed positionId,
-        uint128 debtRepaid,
-        bool fullyLiquidated
+    event LoanRepaid(
+        address indexed borrower,
+        bytes32 indexed positionId,
+        uint256 repaidAmount
     );
-    
-    event CollateralWithdrawn(
-        uint256 indexed positionId,
-        address indexed user,
-        uint128 collateralAmount
-    );
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                              ERRORS
-    // ════════════════════════════════════════════════════════════════════════════
-
-    error OnlyHook();
-    error InvalidAmount();
-    error TransferFailed();
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                              CONSTRUCTOR
-    // ════════════════════════════════════════════════════════════════════════════
 
     constructor(address _hook) {
         hook = TrueLendHook(_hook);
     }
 
-    // ════════════════════════════════════════════════════════════════════════════
-    //                              POSITION MANAGEMENT
-    // ════════════════════════════════════════════════════════════════════════════
-
     /**
-     * @notice Open a new lending position
-     * @param positionId Unique identifier for this position
-     * @param collateralToken Address of collateral token
-     * @param debtToken Address of debt token (for event/tracking, not used in logic)
-     * @param collateralAmount Amount of collateral to deposit
-     * @param debtAmount Amount of debt to borrow
-     * @param zeroForOne True if collateral is token0, debt is token1
-     * @param ltBps Liquidation threshold in basis points (e.g., 8000 = 80%)
+     * @notice Create a borrow position
+     * @param key The pool key for ETH/USDC pool
+     * @param collateralAmount Amount of USDC to deposit as collateral
+     * @param borrowAmount Amount of ETH to borrow
+     * @param liquidationThreshold LT as percentage (e.g., 90 = 90%)
      */
-    function openPosition(
-        uint256 positionId,
-        address collateralToken,
-        address debtToken,
-        uint128 collateralAmount,
-        uint128 debtAmount,
-        bool zeroForOne,
-        uint16 ltBps
-    ) external returns (int24 tickLower, int24 tickUpper) {
-        if (collateralAmount == 0 || debtAmount == 0) revert InvalidAmount();
-
-        // Transfer collateral from user to router
-        IERC20(collateralToken).safeTransferFrom(
+    function borrow(
+        PoolKey calldata key,
+        uint256 collateralAmount,
+        uint256 borrowAmount,
+        uint8 liquidationThreshold
+    ) external returns (bytes32 positionId) {
+        // In production: transfer collateral, create position, send borrowed funds
+        positionId = hook.createPosition(
+            key,
             msg.sender,
-            address(this),
-            collateralAmount
-        );
-
-        // Approve hook to spend collateral
-        IERC20(collateralToken).safeIncreaseAllowance(
-            address(hook),
-            collateralAmount
-        );
-
-        // Open position in hook
-        (tickLower, tickUpper) = hook.openPosition(
-            positionId,
-            msg.sender,  // owner
             collateralAmount,
-            debtAmount,
-            zeroForOne,
-            ltBps
+            borrowAmount,
+            liquidationThreshold
         );
-
-        emit PositionOpened(
-            positionId,
-            msg.sender,
-            collateralToken,
-            debtToken,
-            collateralAmount,
-            debtAmount
-        );
-    }
-
-    /**
-     * @notice Callback from hook when liquidation occurs
-     * @dev Only callable by the hook
-     */
-    function onLiquidation(
-        uint256 positionId,
-        uint128 debtRepaid,
-        bool fullyLiquidated
-    ) external {
-        if (msg.sender != address(hook)) revert OnlyHook();
-
-        // Track debt repayment
-        totalDebtRepaid[positionId] += debtRepaid;
         
-        if (fullyLiquidated) {
-            positionFullyLiquidated[positionId] = true;
-        }
-
-        emit LiquidationReceived(positionId, debtRepaid, fullyLiquidated);
+        emit LoanCreated(msg.sender, positionId, collateralAmount, borrowAmount);
     }
 
     /**
-     * @notice Withdraw collateral after repaying debt
-     * @param positionId Position to close
-     * @param collateralToken Address of collateral token
+     * @notice Check position status
      */
-    function withdrawCollateral(
-        uint256 positionId,
-        address collateralToken
-    ) external returns (uint128 collateralAmount) {
-        // Call hook to withdraw
-        collateralAmount = hook.withdrawCollateral(
-            positionId,
-            address(this)  // Receive collateral here first
-        );
-
-        if (collateralAmount == 0) revert InvalidAmount();
-
-        // Transfer collateral to user
-        IERC20(collateralToken).safeTransfer(msg.sender, collateralAmount);
-
-        emit CollateralWithdrawn(positionId, msg.sender, collateralAmount);
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
-    //                              VIEW FUNCTIONS
-    // ════════════════════════════════════════════════════════════════════════════
-
-    /**
-     * @notice Get total debt repaid for a position through liquidations
-     */
-    function getDebtRepaid(uint256 positionId) external view returns (uint128) {
-        return totalDebtRepaid[positionId];
-    }
-
-    /**
-     * @notice Check if a position was fully liquidated
-     */
-    function isFullyLiquidated(uint256 positionId) external view returns (bool) {
-        return positionFullyLiquidated[positionId];
-    }
-
-    /**
-     * @notice Get position details from hook
-     * Updated to include both liquidityInitial and liquidityRemaining
-     */
-    function getPosition(uint256 positionId) external view returns (
-        address owner,
-        bool zeroForOne,
-        uint128 collateral,
-        uint128 debt,
-        int24 tickLower,
-        int24 tickUpper,
-        uint16 ltBps,
-        uint128 liquidityInitial,
-        uint128 liquidityRemaining,
-        bool isActive
+    function getPositionStatus(bytes32 positionId) external view returns (
+        bool isActive,
+        bool needsLiquidation,
+        uint256 collateralRemaining,
+        uint256 debtRepaid
     ) {
-        TrueLendHook.Position memory pos = hook.getPosition(positionId);
+        TrueLendHook.BorrowPosition memory pos = hook.getPosition(positionId);
         return (
-            pos.owner,
-            pos.zeroForOne,
-            pos.collateral,
-            pos.debt,
-            pos.tickLower,
-            pos.tickUpper,
-            pos.ltBps,
-            pos.liquidityInitial,
-            pos.liquidityRemaining,
-            pos.isActive
+            pos.isActive,
+            pos.needsLiquidation,
+            pos.collateralRemaining,
+            pos.debtRepaid
         );
-    }
-
-    /**
-     * @notice Get liquidation progress for a position
-     * @return liquidityConsumed How much liquidity has been consumed
-     * @return percentLiquidated Percentage liquidated (in basis points)
-     */
-    function getLiquidationProgress(uint256 positionId) external view returns (
-        uint128 liquidityConsumed,
-        uint256 percentLiquidated
-    ) {
-        TrueLendHook.Position memory pos = hook.getPosition(positionId);
-        
-        if (pos.liquidityInitial == 0) {
-            return (0, 0);
-        }
-
-        liquidityConsumed = pos.liquidityInitial - pos.liquidityRemaining;
-        
-        // Calculate percentage in basis points (10000 = 100%)
-        percentLiquidated = (uint256(liquidityConsumed) * 10000) / uint256(pos.liquidityInitial);
-        
-        return (liquidityConsumed, percentLiquidated);
-    }
-
-    /**
-     * @notice Check if a position is currently in liquidation range
-     */
-    function isInLiquidationRange(uint256 positionId) external view returns (bool) {
-        TrueLendHook.Position memory pos = hook.getPosition(positionId);
-        
-        if (!pos.isActive) {
-            return false;
-        }
-
-        int24 currentTick = hook.getCurrentTick();
-        
-        return (currentTick >= pos.tickLower && currentTick <= pos.tickUpper);
     }
 }
