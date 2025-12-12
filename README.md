@@ -21,7 +21,7 @@ Instead of external oracles, TrueLend uses:
 
 
 ## Architecture
-![alt text](https://github.com/[username]/[reponame]/blob/[branch]/image.jpg?raw=true)
+![alt text](https://github.com/queenleoa/TrueLend/blob/fd3a6489316b7bd34bb41c5fa43b1b57dfe74c0f/architecture.png)
 
 ### Hook Functions
 
