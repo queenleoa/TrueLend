@@ -7,9 +7,9 @@ import {TrueLendHook} from "./TrueLendHook.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 /**
- * @title DummyLendingRouter
- * @notice Simplified router for creating and managing borrow positions
- * @dev In production, this would handle lending pool management, interest accrual, etc.
+ * @title TrueLendRouter
+ * @notice Router for creating and managing borrow positions
+ * @dev MVP: Simplified for hackathon demo
  */
 contract TrueLendRouter {
     TrueLendHook public immutable hook;
@@ -44,7 +44,17 @@ contract TrueLendRouter {
         uint256 borrowAmount,
         uint8 liquidationThreshold
     ) external returns (bytes32 positionId) {
-        // In production: transfer collateral, create position, send borrowed funds
+        // Pull collateral from borrower
+        IERC20 collateralToken = IERC20(Currency.unwrap(key.currency1));
+        require(
+            collateralToken.transferFrom(msg.sender, address(this), collateralAmount),
+            "Collateral transfer failed"
+        );
+        
+        // Approve hook to pull collateral
+        collateralToken.approve(address(hook), collateralAmount);
+        
+        // Create position (hook will pull collateral and send borrowed tokens)
         positionId = hook.createPosition(
             key,
             msg.sender,
