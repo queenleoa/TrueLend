@@ -11,7 +11,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
  * @notice Simplified router for creating and managing borrow positions
  * @dev In production, this would handle lending pool management, interest accrual, etc.
  */
-contract DummyLendingRouter {
+contract TrueLendRouter {
     TrueLendHook public immutable hook;
     
     event LoanCreated(
