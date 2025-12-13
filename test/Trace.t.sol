@@ -88,22 +88,32 @@ contract TraceTest is Test, Deployers {
     }
     
     function _addLiquidity() internal {
-        token0.mint(address(this), 100 ether);
-        token1.mint(address(this), 100 ether);
+        // Concentrated liquidity with sufficient depth
+        token0.mint(address(this), 10_000 ether);
+        token1.mint(address(this), 10_000 ether);
         
         token0.approve(address(modifyLiquidityRouter), type(uint256).max);
         token1.approve(address(modifyLiquidityRouter), type(uint256).max);
         
-        int24 tickLower = -600;
-        int24 tickUpper = 600;
-        
         modifyLiquidityRouter.modifyLiquidity(
             poolKey,
             ModifyLiquidityParams({
-                tickLower: tickLower,
-                tickUpper: tickUpper,
-                liquidityDelta: 10 ether,
+                tickLower: -600,
+                tickUpper: 600,
+                liquidityDelta: 100 ether,
                 salt: bytes32(0)
+            }),
+            ""
+        );
+        
+        // Wider range covering liquidation zone
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            ModifyLiquidityParams({
+                tickLower: 600,
+                tickUpper: 99960,  // Aligned to tick spacing 60
+                liquidityDelta: 200 ether,
+                salt: bytes32(uint256(1))
             }),
             ""
         );
@@ -200,7 +210,7 @@ contract TraceTest is Test, Deployers {
         // Try swap
         vm.startPrank(bob);
         
-        console.log("\nAttempting small swap...");
+        console.log("\nAttempting swap...");
         console.log("Bob token1 balance:", token1.balanceOf(bob));
         console.log("Bob token1 allowance to swapRouter:", token1.allowance(bob, address(swapRouter)));
         
@@ -221,25 +231,33 @@ contract TraceTest is Test, Deployers {
             
             (, int24 newTick, , ) = manager.getSlot0(poolKey.toId());
             console.log("New tick:", newTick);
+            console.log("Tick moved:", uint256(int256(newTick - currentTick)));
             
             TrueLendHook.BorrowPosition memory posAfter = hook.getPosition(positionId);
             console.log("Position needsLiquidation after:", posAfter.needsLiquidation);
             console.log("Position collateralRemaining:", posAfter.collateralRemaining);
+            
+            if (newTick >= posBefore.tickLower && !posAfter.needsLiquidation) {
+                console.log("\nWARNING: Tick crossed threshold but liquidation not activated!");
+            } else if (newTick < posBefore.tickLower && !posAfter.needsLiquidation) {
+                console.log("\nOK: Tick below threshold, no liquidation expected");
+            } else if (posAfter.needsLiquidation) {
+                console.log("\nOK: Liquidation properly activated");
+            }
             
         } catch Error(string memory reason) {
             console.log("Swap FAILED with error:", reason);
         } catch Panic(uint256 errorCode) {
             console.log("Swap FAILED with Panic code:", errorCode);
             if (errorCode == 0x11) {
-                console.log("  -> This is arithmetic overflow/underflow");
+                console.log("  -> Arithmetic overflow/underflow");
             } else if (errorCode == 0x12) {
-                console.log("  -> This is divide by zero");
+                console.log("  -> Division by zero");
             }
         } catch (bytes memory lowLevelData) {
             console.log("Swap FAILED with low-level error");
             console.logBytes(lowLevelData);
             
-            // Try to decode common errors
             if (lowLevelData.length >= 4) {
                 bytes4 errorSelector;
                 assembly {
@@ -255,15 +273,15 @@ contract TraceTest is Test, Deployers {
     
     function test_DecodeErrorCodes() public pure {
         console.log("\n=== ERROR CODE REFERENCE ===\n");
-        console.log("0x575e24b4 = ?");
-        console.log("0xa9e35b2f = ?");
+        console.log("0x575e24b4 = Unknown custom error");
+        console.log("0xa9e35b2f = Unknown custom error");
         console.log("0x4e487b71 = Panic(uint256) selector");
         console.log("0x11 = Arithmetic overflow/underflow");
         console.log("0x12 = Division by zero");
         console.log("\nWrappedError structure:");
-        console.log("  First param: 0x...C0 (likely a pointer/offset)");
+        console.log("  First param: Offset/pointer");
         console.log("  Second param: Error selector");
-        console.log("  Third param: Panic data with code 0x11");
-        console.log("  Fourth param: Another error selector");
+        console.log("  Third param: Panic data with code");
+        console.log("  Fourth param: Additional error data");
     }
 }

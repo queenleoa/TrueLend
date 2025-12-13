@@ -16,6 +16,7 @@ import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {console} from "forge-std/console.sol";
 
 /**
  * @title TrueLend Oracleless Liquidation Hook
@@ -27,6 +28,9 @@ contract TrueLendHook is BaseHook {
     using CurrencyLibrary for Currency;
     using CurrencySettler for Currency;
     using FixedPointMathLib for uint256;
+
+    // Reentrancy lock to prevent hook from processing its own liquidation swaps
+    bool private _inLiquidationSwap;
 
     error OnlyLendingRouter();
     error PositionNotActive();
@@ -147,11 +151,13 @@ contract TrueLendHook is BaseHook {
         SwapParams calldata params,
         bytes calldata
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
-
-        int24 estimatedNewTick = _estimateNewTick(key, params, currentTick);
-        _checkAndActivateLiquidations(key, currentTick, estimatedNewTick);
-
+        // Skip hook logic if this is a liquidation swap from the hook itself
+        if (_inLiquidationSwap) {
+            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+        
+        // Don't estimate - we'll check actual tick in afterSwap
+        // Estimation with concentrated liquidity is too unreliable
         return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
@@ -162,52 +168,42 @@ contract TrueLendHook is BaseHook {
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, int128) {
+        // Check actual tick and activate/deactivate liquidations based on reality
+        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
+        _checkAndToggleLiquidations(key, currentTick);
+        
+        // Execute any active liquidation chunks
         _executeLiquidationChunks(key);
         return (this.afterSwap.selector, 0);
     }
 
-    function _checkAndActivateLiquidations(
+    function _checkAndToggleLiquidations(
         PoolKey calldata key,
-        int24 currentTick,
-        int24 newTick
+        int24 currentTick
     ) internal {
         PoolId poolId = key.toId();
         int24[] memory ticks = activeTicks[poolId];
 
         for (uint i = 0; i < ticks.length; i++) {
             int24 tick = ticks[i];
-            bool crossedIntoRange = (currentTick < tick && newTick >= tick);
-
-            if (crossedIntoRange) {
-                bytes32[] memory posIds = positionsAtTick[poolId][tick];
-                for (uint j = 0; j < posIds.length; j++) {
-                    BorrowPosition storage pos = positions[posIds[j]];
-                    if (
-                        pos.isActive &&
-                        !pos.needsLiquidation &&
-                        newTick >= pos.tickLower
-                    ) {
-                        pos.needsLiquidation = true;
-                        pos.liquidationStartTime = block.timestamp;
-                        pos.lastLiquidationTime = block.timestamp - CHUNK_TIME_INTERVAL;
-                    }
-                }
-            }
-
-            bool crossedOutOfRange = (currentTick >= tick && newTick < tick);
-            if (crossedOutOfRange) {
-                bytes32[] memory posIds = positionsAtTick[poolId][tick];
-                for (uint j = 0; j < posIds.length; j++) {
-                    BorrowPosition storage pos = positions[posIds[j]];
-                    if (
-                        pos.isActive &&
-                        pos.needsLiquidation &&
-                        newTick < pos.tickLower
-                    ) {
-                        pos.needsLiquidation = false;
-                        pos.totalTimeInLiquidation += (block.timestamp -
-                            pos.liquidationStartTime);
-                    }
+            bytes32[] memory posIds = positionsAtTick[poolId][tick];
+            
+            for (uint j = 0; j < posIds.length; j++) {
+                BorrowPosition storage pos = positions[posIds[j]];
+                if (!pos.isActive) continue;
+                
+                // Check if we're in liquidation range
+                bool inRange = (currentTick >= pos.tickLower && currentTick <= pos.tickUpper);
+                
+                if (inRange && !pos.needsLiquidation) {
+                    // Entered liquidation range
+                    pos.needsLiquidation = true;
+                    pos.liquidationStartTime = block.timestamp;
+                    pos.lastLiquidationTime = block.timestamp - CHUNK_TIME_INTERVAL;
+                } else if (!inRange && pos.needsLiquidation) {
+                    // Exited liquidation range
+                    pos.needsLiquidation = false;
+                    pos.totalTimeInLiquidation += (block.timestamp - pos.liquidationStartTime);
                 }
             }
         }
@@ -324,6 +320,9 @@ contract TrueLendHook is BaseHook {
             false
         );
 
+        // Set reentrancy lock to prevent this swap from triggering hook logic
+        _inLiquidationSwap = true;
+        
         BalanceDelta swapDelta = poolManager.swap(
             swapData.poolKey,
             SwapParams({
@@ -333,6 +332,9 @@ contract TrueLendHook is BaseHook {
             }),
             ""
         );
+        
+        // Clear reentrancy lock
+        _inLiquidationSwap = false;
 
         uint256 ethReceived = uint256(uint128(-swapDelta.amount0()));
         swapData.poolKey.currency0.take(
@@ -581,59 +583,136 @@ contract TrueLendHook is BaseHook {
         }
     }
 
-    // FIXED: Proper tick estimation based on swap amount, not price limit
+    /**
+     * @notice Estimate new tick after swap with non-linear scaling for large swaps
+     * @dev Uses progressive multipliers based on swap size relative to liquidity
+     */
     function _estimateNewTick(
         PoolKey calldata key,
         SwapParams calldata params,
         int24 currentTick
     ) internal view returns (int24) {
         uint128 liquidity = poolManager.getLiquidity(key.toId());
+        console.log("_estimateNewTick called:");
+        console.log("  liquidity:", liquidity);
+        console.log("  currentTick:", uint256(int256(currentTick)));
+        
         if (liquidity == 0) return currentTick;
-
+        
         int256 amount = params.amountSpecified;
+        console.log("  amount (int256):", uint256(amount < 0 ? -amount : amount));
+        console.log("  amount is negative:", amount < 0);
+        
         if (amount == 0) return currentTick;
         
-        // Rough approximation: tick moves proportionally to amount/liquidity
-        // For small swaps: Δsqrt(P) ≈ Δamount / L
-        // And Δtick ≈ Δsqrt(P) / sqrt(P) * constant
-        // Simplified: every 1% of pool liquidity moved ≈ ~1000 ticks (very rough)
+        // For very large swaps relative to liquidity, they'll move price dramatically
+        uint256 absAmount = amount < 0 ? uint256(-amount) : uint256(amount);
+        uint256 liquidityUint = uint256(liquidity);
         
-        int256 liquidityInt = int256(uint256(liquidity));
+        console.log("  absAmount:", absAmount);
+        console.log("  liquidityUint:", liquidityUint);
+        console.log("  absAmount > liquidityUint/2?:", absAmount > liquidityUint / 2);
+        
+        // If swap is > 50% of liquidity, expect massive price movement
+        // BUT: with concentrated liquidity, we'll likely hit range boundaries
+        // So cap the estimate more conservatively
+        if (absAmount > liquidityUint / 2) {
+            console.log("  BRANCH: Large swap (>50% liquidity)");
+            // For concentrated liquidity, large swaps will hit range boundaries
+            // Don't assume we'll reach the price limit - estimate more conservatively
+            
+            // Estimate ~50-60% of max possible movement since liquidity will decrease
+            // as we move through ranges
+            if (params.sqrtPriceLimitX96 != 0) {
+                int24 limitTick = TickMath.getTickAtSqrtPrice(params.sqrtPriceLimitX96);
+                console.log("  limitTick:", uint256(int256(limitTick)));
+                int24 movementToLimit = limitTick - currentTick;
+                console.log("  movementToLimit:", uint256(int256(movementToLimit)));
+                
+                // Only expect to move ~50% of the way due to liquidity decreasing
+                // in wider ranges (conservative estimate for concentrated liquidity)
+                int24 conservativeEstimate = currentTick + (movementToLimit / 2);
+                console.log("  Conservative estimate (50% of limit):", uint256(int256(conservativeEstimate)));
+                return conservativeEstimate;
+            } else {
+                // No limit specified, estimate moderate movement
+                // Don't go crazy - concentrated liquidity means less movement
+                int24 moderateMove = params.zeroForOne ? int24(-30000) : int24(30000);
+                return currentTick + moderateMove;
+            }
+        }
+        
+        console.log("  BRANCH: Normal swap (<50% liquidity)");
+        // For smaller swaps, use non-linear approximation
+        int256 liquidityInt = int256(liquidityUint);
         
         // Calculate basis points (amount * 10000 / liquidity)
         int256 bps = (amount * 10000) / liquidityInt;
+        int256 absBps = bps < 0 ? -bps : bps;
         
-        // Convert to approximate tick movement
-        // 100 bps (1%) ≈ 1000 ticks, so 1 bps ≈ 10 ticks
-        int256 estimatedMoveInt = bps * 10;
+        console.log("  bps:", uint256(absBps));
+        console.log("  (Direction will come from zeroForOne parameter)");
         
-        // Cap the estimate to reasonable bounds
-        if (estimatedMoveInt > 100000) estimatedMoveInt = 100000;
-        if (estimatedMoveInt < -100000) estimatedMoveInt = -100000;
+        // Non-linear scaling based on swap size
+        // Use ABSOLUTE value for calculation - direction comes from zeroForOne only
+        // IMPORTANT: For concentrated liquidity, scale down estimates by ~50%
+        // because liquidity decreases as we move through ranges
+        int256 estimatedMoveInt;
+        
+        if (absBps < 100) {
+            // < 1% of liquidity: roughly linear, ~10 ticks per bp
+            estimatedMoveInt = int256(absBps) * 10;
+            console.log("  Using 10x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
+        } else if (absBps < 1000) {
+            // 1-10% of liquidity: accelerating impact
+            estimatedMoveInt = int256(absBps) * 50;
+            console.log("  Using 50x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
+        } else if (absBps < 5000) {
+            // 10-50% of liquidity: strong exponential impact
+            estimatedMoveInt = int256(absBps) * 200;
+            console.log("  Using 200x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
+        } else {
+            // Approaching 50% of liquidity: extreme impact
+            estimatedMoveInt = int256(absBps) * 500;
+            console.log("  Using 500x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
+        }
+        
+        // For concentrated liquidity: Scale down by 50% since liquidity will drop
+        // as we move out of tight ranges into wider ranges with less depth
+        estimatedMoveInt = estimatedMoveInt / 2;
+        console.log("  After 50% concentration adjustment:", uint256(estimatedMoveInt));
+        
+        // Cap to reasonable bounds
+        if (estimatedMoveInt > 150000) estimatedMoveInt = 150000;
+        if (estimatedMoveInt < -150000) estimatedMoveInt = -150000;
+        
+        console.log("  After capping, estimatedMoveInt:", uint256(estimatedMoveInt));
         
         int24 estimatedMove = int24(estimatedMoveInt);
-        
-        // Apply direction
         int24 estimatedTick = params.zeroForOne 
             ? currentTick - estimatedMove 
             : currentTick + estimatedMove;
+        
+        console.log("  zeroForOne:", params.zeroForOne);
+        console.log("  Calculated estimatedTick:", currentTick);
+        console.log("  + estimatedMove:", uint256(int256(estimatedMove)));
+        console.log("  = ", uint256(int256(estimatedTick)));
         
         // Clamp to valid tick range
         if (estimatedTick > TickMath.MAX_TICK) estimatedTick = TickMath.MAX_TICK;
         if (estimatedTick < TickMath.MIN_TICK) estimatedTick = TickMath.MIN_TICK;
         
-        // If there's a price limit, don't exceed it (but don't use it as the estimate)
+        // Respect price limit as a bound
         if (params.sqrtPriceLimitX96 != 0) {
             int24 limitTick = TickMath.getTickAtSqrtPrice(params.sqrtPriceLimitX96);
             if (params.zeroForOne) {
-                // Price decreasing, tick decreasing
                 if (estimatedTick < limitTick) estimatedTick = limitTick;
             } else {
-                // Price increasing, tick increasing  
                 if (estimatedTick > limitTick) estimatedTick = limitTick;
             }
         }
         
+        console.log("  Final estimated tick:", uint256(int256(estimatedTick)));
         return estimatedTick;
     }
 

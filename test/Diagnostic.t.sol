@@ -85,22 +85,33 @@ contract DiagnosticTest is Test, Deployers {
     }
     
     function _addLiquidity() internal {
-        token0.mint(address(this), 100 ether);
-        token1.mint(address(this), 100 ether);
+        // Use concentrated liquidity with enough depth
+        token0.mint(address(this), 10_000 ether);
+        token1.mint(address(this), 10_000 ether);
         
         token0.approve(address(modifyLiquidityRouter), type(uint256).max);
         token1.approve(address(modifyLiquidityRouter), type(uint256).max);
         
-        int24 tickLower = -600;
-        int24 tickUpper = 600;
-        
+        // Tight range for initial liquidity
         modifyLiquidityRouter.modifyLiquidity(
             poolKey,
             ModifyLiquidityParams({
-                tickLower: tickLower,
-                tickUpper: tickUpper,
-                liquidityDelta: 10 ether,
+                tickLower: -600,
+                tickUpper: 600,
+                liquidityDelta: 100 ether,
                 salt: bytes32(0)
+            }),
+            ""
+        );
+        
+        // Wider range covering liquidation zone
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            ModifyLiquidityParams({
+                tickLower: 600,
+                tickUpper: 99960,  // Aligned to tick spacing 60
+                liquidityDelta: 200 ether,  // More depth
+                salt: bytes32(uint256(1))
             }),
             ""
         );
@@ -121,9 +132,9 @@ contract DiagnosticTest is Test, Deployers {
         
         // Create position
         console.log("\n=== Creating Position ===");
-        console.log("Collateral (token1):, 4000e18");
-        console.log("Debt (token0):, 1 ether");
-        console.log("LT:, 90");
+        console.log("Collateral (token1): 4000e18");
+        console.log("Debt (token0): 1 ether");
+        console.log("LT: 90");
         
         bytes32 positionId = router.borrow(
             poolKey,
