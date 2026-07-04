@@ -4,6 +4,8 @@
 
 The mechanism is unchanged from the hackathon design: a borrower picks a liquidation threshold (up to 99%); the position gets a liquidation tick range; while the pool price is inside that range the position decays in small time-paced chunks sold via the pool itself; a penalty per chunk is donated to LPs; if price exits the range, decay pauses. v2 fixes the execution bugs, adds the missing lender side, bounds gas, and hardens origination — it does not change the liquidation model.
 
+> Background, prior art, feasibility analysis (including why passive "inverse range orders" are impossible on v4 and chunked execution is the correct AMM-native mechanism), and all supporting math: see [RESEARCH.md](RESEARCH.md).
+
 ---
 
 ## 1. What was broken in v1 (fix list, not a redesign)
