@@ -18,6 +18,7 @@ import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 
+import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {TrueLendHook} from "../src/TrueLendHook.sol";
 import {LendingVault} from "../src/LendingVault.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
@@ -51,10 +52,15 @@ contract TrueLendHookTest is Test, Deployers {
         if (address(token0) > address(token1)) (token0, token1) = (token1, token0);
 
         factory = new VaultFactory();
-        address hookAddress =
-            address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG));
-        deployCodeTo("TrueLendHook.sol", abi.encode(address(manager), address(factory)), hookAddress);
-        hook = TrueLendHook(hookAddress);
+        // mine + CREATE2, exactly like production deployment (links libraries)
+        (address hookAddress, bytes32 hookSalt) = HookMiner.find(
+            address(this),
+            uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG),
+            type(TrueLendHook).creationCode,
+            abi.encode(address(manager), address(factory))
+        );
+        hook = new TrueLendHook{salt: hookSalt}(manager, factory);
+        require(address(hook) == hookAddress, "hook address mismatch");
 
         poolKey = PoolKey({
             currency0: Currency.wrap(address(token0)),
@@ -517,6 +523,45 @@ contract TrueLendHookTest is Test, Deployers {
         assertGt(token1.balanceOf(alice), aliceT1Before, "borrower got the surplus");
     }
 
+    /// The "what if all LP liquidity is gone" case: forceClose must NOT fire-sale
+    /// collateral into an empty book. With the slippage bound, nothing fills, the
+    /// position survives intact, and the close succeeds once liquidity returns.
+    function test_forceClose_drainedPool_noFireSale() public {
+        bytes32 id = _openDefault();
+        skip(181 days); // expiry makes it eligible without moving price
+        assertEq(hook.forceCloseReason(id), 2);
+
+        // LP pulls all liquidity
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            ModifyLiquidityParams({tickLower: -887220, tickUpper: 887220, liquidityDelta: -100_000e18, salt: 0}),
+            ""
+        );
+
+        uint256 lenderValueBefore = vault1.convertToAssets(vault1.balanceOf(lender));
+        vm.prank(keeper);
+        hook.forceClose(id);
+
+        // nothing filled: collateral intact, debt intact, no write-off
+        TrueLendHook.Position memory pos = hook.getPosition(id);
+        assertEq(pos.borrower, alice, "position still open");
+        assertEq(pos.collateral, 100e18, "collateral NOT fire-sold");
+        assertGt(pos.debtShares, 0);
+        assertEq(vault1.totalUncoveredShortfall(), 0, "no bad debt booked");
+        assertEq(vault1.convertToAssets(vault1.balanceOf(lender)), lenderValueBefore, "lenders unharmed");
+
+        // liquidity returns -> retry closes cleanly
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            ModifyLiquidityParams({tickLower: -887220, tickUpper: 887220, liquidityDelta: 100_000e18, salt: 0}),
+            ""
+        );
+        vm.prank(keeper);
+        hook.forceClose(id);
+        assertEq(hook.getPosition(id).borrower, address(0), "closed on retry");
+        assertEq(vault1.totalBorrowShares(), 0);
+    }
+
     function test_forceClose_revertsWhenHealthy() public {
         bytes32 id = _openDefault();
         assertEq(hook.forceCloseReason(id), 0);
@@ -614,21 +659,8 @@ contract TrueLendHookTest is Test, Deployers {
 
     // ------------------------------------------------------------------ config plumbing
 
-    function _cfg() internal view returns (TrueLendHook.Config memory cfg) {
-        (
-            cfg.rangeWidth,
-            cfg.minGapTicks,
-            cfg.maxLtBps,
-            cfg.basePenaltyBps,
-            cfg.slippageBufferBps,
-            cfg.maxChunkDepthBps,
-            cfg.targetChunks,
-            cfg.chunkInterval,
-            cfg.timeCapX,
-            cfg.termSeconds,
-            cfg.rewardBps,
-            cfg.minBorrow
-        ) = hook.configs(poolId);
+    function _cfg() internal view returns (TrueLendHook.Config memory) {
+        return hook.getConfig(poolId);
     }
 
     function test_config_onlyOwner() public {

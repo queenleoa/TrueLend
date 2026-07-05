@@ -46,6 +46,9 @@ contract TrueLendHook is BaseHook {
     uint256 internal constant MAX_CHUNKS_PER_POKE = 10;
     uint256 internal constant MAX_TRIGGERS_PER_WALK = 8;
     uint256 internal constant MAX_REFRESHES_PER_WALK = 32;
+    // max adverse price movement a forceClose sale may cause (~10.5%); unfilled
+    // remainder stays as collateral and the close is retried later
+    int24 internal constant FC_MAX_SLIPPAGE_TICKS = 1000;
     uint16 internal constant MIN_LT_BPS = 5000;
     // open-time LTV must sit below the chosen LT by this factor (95%)
     uint256 internal constant OPEN_LTV_HEADROOM_BPS = 9500;
@@ -100,12 +103,12 @@ contract TrueLendHook is BaseHook {
     VaultFactory public immutable vaultFactory;
 
     mapping(PoolId => PoolState) internal pools;
-    mapping(PoolId => Config) public configs;
+    mapping(PoolId => Config) internal configs; // read via getConfig()
     mapping(PoolId => TruncatedOracle.State) internal oracles;
     mapping(PoolId => TriggerIndex.State) internal triggers;
     mapping(PoolId => bytes32[]) internal liqQueue;
     mapping(PoolId => uint256) internal queueCursor;
-    mapping(bytes32 => Position) public positions;
+    mapping(bytes32 => Position) internal positions; // read via getPosition()
     uint256 internal positionNonce;
     uint256 internal locked = 1;
 
@@ -337,8 +340,7 @@ contract TrueLendHook is BaseHook {
         Position storage pos = positions[positionId];
         if (pos.borrower == address(0)) revert PositionNotActive();
         if (assets == 0) revert AmountTooSmall();
-        PoolState storage pool = pools[pos.poolId];
-        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+        LendingVault vault = _debtVault(pos);
 
         ERC20 debtAsset = vault.asset();
         debtAsset.safeTransferFrom(msg.sender, address(this), assets);
@@ -509,11 +511,12 @@ contract TrueLendHook is BaseHook {
         pos.collateral -= uint128(chunk);
         pos.lastChunkAt = uint40(block.timestamp);
 
-        (uint256 proceeds, uint256 penalty) = _swapCollateral(key, pos, chunk, _currentPenaltyBps(pos, cfg));
+        (uint256 consumed, uint256 proceeds, uint256 penalty) =
+            _swapCollateral(key, pos, chunk, _currentPenaltyBps(pos, cfg), 0);
+        if (consumed < chunk) pos.collateral += uint128(chunk - consumed); // unbounded limit: only at pool edge
 
         // repay the vault with net proceeds
-        PoolState storage pool = pools[poolId];
-        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+        LendingVault vault = _debtVault(pos);
         uint256 net = proceeds - penalty;
         uint256 used;
         uint256 burned;
@@ -525,7 +528,7 @@ contract TrueLendHook is BaseHook {
                 vault.asset().safeTransfer(pos.borrower, net - used);
             }
         }
-        emit ChunkExecuted(positionId, chunk, proceeds, penalty, used);
+        emit ChunkExecuted(positionId, consumed, proceeds, penalty, used);
 
         if (pos.debtShares == 0) {
             _closePosition(positionId, 0);
@@ -535,27 +538,38 @@ contract TrueLendHook is BaseHook {
         return true;
     }
 
-    /// @dev Swap `amount` of the position's collateral into the debt currency and
-    /// donate the penalty to in-range LPs. Settles all deltas. Returns gross
-    /// proceeds and the penalty actually donated.
-    function _swapCollateral(PoolKey memory key, Position storage pos, uint256 amount, uint256 penaltyBps_)
-        internal
-        returns (uint256 proceeds, uint256 penalty)
-    {
+    /// @dev Swap up to `amount` of the position's collateral into the debt
+    /// currency (bounded by `sqrtPriceLimit`; 0 = unbounded) and donate the
+    /// penalty to in-range LPs. Settles all deltas. Returns the collateral
+    /// actually consumed (partial when the price limit is hit), gross proceeds,
+    /// and the penalty actually donated.
+    function _swapCollateral(
+        PoolKey memory key,
+        Position storage pos,
+        uint256 amount,
+        uint256 penaltyBps_,
+        uint160 sqrtPriceLimit
+    ) internal returns (uint256 consumed, uint256 proceeds, uint256 penalty) {
         bool zeroForOne = pos.collateralIs0;
+        if (sqrtPriceLimit == 0) {
+            sqrtPriceLimit = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
+        }
         BalanceDelta delta = poolManager.swap(
             key,
             SwapParams({
                 zeroForOne: zeroForOne,
                 amountSpecified: -int256(amount), // exact input
-                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                sqrtPriceLimitX96: sqrtPriceLimit
             }),
             ""
         );
+        consumed = uint256(uint128(-(zeroForOne ? delta.amount0() : delta.amount1())));
         proceeds = uint256(uint128(zeroForOne ? delta.amount1() : delta.amount0()));
 
-        // pay the collateral in
-        (zeroForOne ? key.currency0 : key.currency1).settle(poolManager, address(this), amount, false);
+        // pay the consumed collateral in
+        if (consumed > 0) {
+            (zeroForOne ? key.currency0 : key.currency1).settle(poolManager, address(this), consumed, false);
+        }
 
         // donate penalty to in-range LPs (skip if pool momentarily has no active liquidity)
         penalty = FullMath.mulDiv(proceeds, penaltyBps_, BPS);
@@ -567,7 +581,9 @@ contract TrueLendHook is BaseHook {
         }
 
         // take net proceeds
-        (zeroForOne ? key.currency1 : key.currency0).take(poolManager, address(this), proceeds - penalty, false);
+        if (proceeds > penalty) {
+            (zeroForOne ? key.currency1 : key.currency0).take(poolManager, address(this), proceeds - penalty, false);
+        }
     }
 
     // ------------------------------------------------------------------ force close
@@ -581,30 +597,50 @@ contract TrueLendHook is BaseHook {
         (, int24 tick,,) = poolManager.getSlot0(pos.poolId);
         _refreshPosition(positionId, tick);
 
-        uint256 collateralSold = pos.collateral;
+        uint256 collateralToSell = pos.collateral;
         uint256 reward;
         uint256 used;
-        if (collateralSold > 0) {
+        if (collateralToSell > 0) {
             pos.collateral = 0; // effects before interactions
-            (uint256 proceeds, uint256 penalty) =
-                _swapCollateral(key, pos, collateralSold, _currentPenaltyBps(pos, cfg));
+
+            // execution is slippage-bounded: in a drained or manipulated pool the
+            // sale fills only within FC_MAX_SLIPPAGE_TICKS of the current price;
+            // whatever doesn't fill stays as collateral and forceClose is retried
+            // later — never a fire sale into an empty book.
+            uint160 limit;
+            {
+                int24 limitTick = pos.collateralIs0 ? tick - FC_MAX_SLIPPAGE_TICKS : tick + FC_MAX_SLIPPAGE_TICKS;
+                if (limitTick < TickMath.MIN_TICK) limitTick = TickMath.MIN_TICK + 1;
+                if (limitTick > TickMath.MAX_TICK) limitTick = TickMath.MAX_TICK - 1;
+                limit = TickMath.getSqrtPriceAtTick(limitTick);
+            }
+            (uint256 consumed, uint256 proceeds, uint256 penalty) =
+                _swapCollateral(key, pos, collateralToSell, _currentPenaltyBps(pos, cfg), limit);
+            if (consumed < collateralToSell) pos.collateral = uint128(collateralToSell - consumed);
 
             // caller reward comes out of the penalty flow, not the borrower's hide
             reward = FullMath.mulDiv(proceeds, cfg.rewardBps, BPS);
             if (reward > proceeds - penalty) reward = proceeds - penalty;
 
-            PoolState storage pool = pools[pos.poolId];
-            LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+            LendingVault vault = _debtVault(pos);
             uint256 net = proceeds - penalty - reward;
-            uint256 burned;
-            (burned, used) = vault.repay(net, pos.debtShares);
-            pos.debtShares -= uint128(burned);
-            if (net > used) vault.asset().safeTransfer(pos.borrower, net - used);
+            if (net > 0) {
+                uint256 burned;
+                (burned, used) = vault.repay(net, pos.debtShares);
+                pos.debtShares -= uint128(burned);
+                if (net > used) vault.asset().safeTransfer(pos.borrower, net - used);
+            }
             if (reward > 0) vault.asset().safeTransfer(caller, reward);
         }
 
         emit ForceClosed(positionId, caller, reason, reward);
-        _closePosition(positionId, pos.debtShares); // any remainder is bad debt
+        if (pos.debtShares == 0) {
+            _closePosition(positionId, 0); // debt cleared; leftovers go home
+        } else if (pos.collateral == 0) {
+            _closePosition(positionId, pos.debtShares); // nothing left to sell: bad debt
+        }
+        // else: partial fill under the slippage bound — position stays open and
+        // remains forceClose-eligible; keepers retry as liquidity returns
     }
 
     function _forceCloseReason(bytes32 positionId) internal view returns (uint8) {
@@ -617,9 +653,7 @@ contract TrueLendHook is BaseHook {
         // health breach: at the CURRENT price, remaining collateral (after the
         // slippage buffer) no longer covers the debt — interest erosion or a
         // partial gap-through has made waiting strictly worse for lenders
-        PoolState storage pool = pools[pos.poolId];
-        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
-        uint256 debt = vault.debtAssetsForShares(pos.debtShares);
+        uint256 debt = _debtVault(pos).debtAssetsForShares(pos.debtShares);
         uint256 collValue =
             LiqRangeMath.convertAtSqrtPrice(pos.collateral, TickMath.getSqrtPriceAtTick(tick), pos.collateralIs0);
         uint256 usable = FullMath.mulDiv(collValue, BPS - configs[pos.poolId].slippageBufferBps, BPS);
@@ -677,6 +711,15 @@ contract TrueLendHook is BaseHook {
             : SqrtPriceMath.getAmount1Delta(lo, hi, liquidity, false);
     }
 
+    function _debtVault(Position storage pos) internal view returns (LendingVault) {
+        PoolState storage pool = pools[pos.poolId];
+        return pos.collateralIs0 ? pool.vault1 : pool.vault0;
+    }
+
+    function getConfig(PoolId poolId) external view returns (Config memory) {
+        return configs[poolId];
+    }
+
     function getPosition(bytes32 positionId) external view returns (Position memory) {
         return positions[positionId];
     }
@@ -698,9 +741,7 @@ contract TrueLendHook is BaseHook {
     function debtOf(bytes32 positionId) external view returns (uint256) {
         Position storage pos = positions[positionId];
         if (pos.borrower == address(0)) return 0;
-        PoolState storage pool = pools[pos.poolId];
-        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
-        return vault.debtAssetsForShares(pos.debtShares);
+        return _debtVault(pos).debtAssetsForShares(pos.debtShares);
     }
 
     // ------------------------------------------------------------------ admin

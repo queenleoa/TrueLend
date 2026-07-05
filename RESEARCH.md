@@ -276,3 +276,47 @@ Spot move across `[√P, √P′]` at constant `L`: capital `Δy = L(√P′−�
 **Protocols** — [Instadapp: Oracleless Lending on v4](https://blog.instadapp.io/oracleless-lending-protocol-on-uniswap-v4/) · [crvUSD whitepaper](https://resources.curve.finance/pdf/curve-stablecoin.pdf) · [LLAMMA explainer](https://docs.curve.finance/developer/crvusd/llamma-explainer) · [Soft liquidations](https://resources.curve.finance/crvusd/advanced-liquidation/) · [IntoTheBlock on crvUSD losses](https://medium.com/intotheblock/crvusd-liquidating-them-softly-20079dcb527d) · [LlamaLend post-mortem](https://gov.curve.finance/t/llamalend-sdola-long2-post-mortem/11020) · [LIKWID](https://docs.likwid.fi/) · [Ajna whitepaper](https://www.ajna.finance/pdf/Ajna_Protocol_Whitepaper_01-11-2024.pdf) · [Block Analitica on Ajna auctions](https://blockanalitica.substack.com/p/ajna-liquidation-analysis) · [Timeswap whitepaper](https://timeswap.io/whitepaper.pdf) · [InfinityPools](https://docs.infinitypools.finance/protocol-overview/introduction) · [Panoptic paper](https://arxiv.org/abs/2204.14232) · [Panoptic liquidations](https://panoptic.xyz/docs/panoptic-protocol/liquidations) · [GammaSwap](https://docs.gammaswap.com) · [Ammalgam](https://docs.ammalgam.xyz) · [Bunni v2](https://docs.bunni.xyz/docs/v2/technical/overview/)
 
 **Economics** — [LVR (Milionis–Moallemi–Roughgarden–Zhang)](https://arxiv.org/pdf/2208.06046) · [a16z LVR explainer](https://a16zcrypto.com/posts/article/lvr-quantifying-the-cost-of-providing-liquidity-to-automated-market-makers/) · [Euler TWAP attack-cost model](https://github.com/euler-xyz/uni-v3-twap-manipulation/blob/master/cost-of-attack.tex) · [ChainSecurity — oracle manipulation post-merge](https://www.chainsecurity.com/blog/oracle-manipulation-after-merge) · [Multi-block MEV measurement](https://arxiv.org/pdf/2501.12827) · [JIT attacks (IACR 2023/973)](https://eprint.iacr.org/2023/973.pdf) · [Aave IRM (RareSkills)](https://www.rareskills.io/post/aave-interest-rate-model)
+
+
+---
+
+## Appendix: could the chunk engine liquidate perps?
+
+Short answer: **yes — a perp on this engine is a looped TrueLend loan, and the liquidation mechanism carries over unchanged.** What changes is only the vocabulary and one periphery contract.
+
+### The construction
+
+A leveraged long on ETH (margin in USDC) is exactly: *hold ETH collateral, owe USDC debt*. That is a TrueLend position. Leverage comes from looping — deposit ETH, borrow USDC, buy ETH with it, add to collateral, repeat — which a small periphery "LeverageRouter" can do atomically in one transaction (v4 flash accounting: borrow, swap, deposit inside one unlock). The result is a single hook position with:
+
+```
+exposure   = C            (total ETH held as collateral)
+margin     = C − D/P      (what the trader actually funded)
+leverage   = 1 / (1 − LTV)          LTV 94% → ~17x · LTV 98% → 50x
+```
+
+A short is the mirror image (USDC collateral, ETH debt) — the direction the hook already supports.
+
+### The dictionary: lending terms ↔ perp terms
+
+| Lending (as built) | Perp equivalent |
+|---|---|
+| 1 − LTV at open (≥ 5% of LT by headroom) | **initial margin** |
+| 1 − LT | **maintenance margin** (LT 99% = 1% MM) |
+| liquidation range start (LT price) | margin-call price |
+| liquidation range **end** | **bankruptcy price** |
+| the range between them + chunk decay | **partial liquidation / auto-deleveraging zone** — losses realized progressively instead of one-shot ADL |
+| chunk penalty → LPs | liquidation fee → the venue's liquidity |
+| borrow APR on the debt vault | **funding rate** — and it is *organically skew-sensitive*: long OI borrows the USDC vault, short OI borrows the ETH vault, so one-sided open interest pushes that vault's utilization and rate up. Funding emerges from the kink curve with no funding-rate oracle |
+| `forceClose` past range end / health breach | backstop liquidation at bankruptcy |
+| term + expiry | naturally gives **dated futures**; rolling = close+reopen (a perp needs the router to roll, or no term for perp-mode pools) |
+
+### Why the margin still cannot sit "in the range" as a passive order
+
+The question "how would collateral be deposited in the range for perps" has the same answer §1 forced for lending: it can't, passively. A long's liquidation requires *selling ETH as ETH falls* — the stop-side trade passive liquidity cannot make, for margin exactly as for loan collateral. Perp margin systems on AMMs face the identical impossibility, which is why the chunk engine (active, rate-limited, in-range execution) is the transferable asset here: it is a liquidation mechanism for *any* levered claim whose collateral and debt are the pool's two tokens — lending today, perps via looping, and in principle any margined spot structure.
+
+### What would actually need building (deliberately not in v1)
+
+1. **LeverageRouter** (~150 lines periphery): atomic loop/unloop, roll at expiry, PnL-at-a-glance views. The hook itself is unchanged.
+2. **Config profile for perp pools**: higher open-LTV headroom (the 95% constant caps leverage at ~17x; 98–99% headroom → 50–100x), shorter or no term, possibly narrower ranges (tighter bankruptcy gap at high leverage).
+3. **Honest UX framing**: this is fully-collateralized isolated margin — no cross-margin, no unrealized-PnL-as-margin, no negative balances (bankruptcy price is a hard floor by construction, like InfinityPools). That is a *feature* (no socialized ADL, no insurance-fund blowups) but it is margin trading, not a CEX-style perp, and should be sold as such.
+4. **The same modeling notebook**, with a leverage axis: at 50x the liquidation range is ~2% wide and the pacing constants matter much more; chunk interval and depth caps need to be re-derived per leverage tier.

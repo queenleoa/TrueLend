@@ -19,14 +19,14 @@ library TriggerIndex {
         bitPos = uint8(uint24(compressed % 256));
     }
 
-    function register(State storage self, int24 tick, int24 spacing, bytes32 id) internal {
+    function register(State storage self, int24 tick, int24 spacing, bytes32 id) public {
         int24 compressed = tick / spacing; // tick is aligned; exact division
         self.idsAt[tick].push(id);
         (int16 wordPos, uint8 bitPos) = _split(compressed);
         self.bitmap[wordPos] |= (1 << bitPos);
     }
 
-    function deregister(State storage self, int24 tick, int24 spacing, bytes32 id) internal {
+    function deregister(State storage self, int24 tick, int24 spacing, bytes32 id) public {
         bytes32[] storage ids = self.idsAt[tick];
         uint256 n = ids.length;
         for (uint256 i = 0; i < n; i++) {
@@ -47,7 +47,7 @@ library TriggerIndex {
     /// bounded by maxTriggers. Returns the found ticks and the tick up to which
     /// the walk is complete (== toTick unless the cap was hit).
     function crossedTriggers(State storage self, int24 fromTick, int24 toTick, int24 spacing, uint256 maxTriggers)
-        internal
+        public
         view
         returns (int24[] memory ticks, uint256 count, int24 walkedTo)
     {

@@ -151,21 +151,88 @@ There is no separate router contract: v1's router added an unauthenticated regis
 
 ## 4. The liquidation engine, precisely
 
-**Trigger detection.** The hook keeps, per pool: `lastTick`, a bitmap of ticks that are some position's range-start or range-end, and per-tick position lists. In `afterSwap` it walks only the ticks in the interval `(lastTick, newTick]` that are set in the bitmap. Cost is O(triggers actually crossed). A swap crossing no trigger tick costs a few hundred gas of overhead.
+### 4.1 What kind of thing this is: a conditional TWAMM
 
-**Chunk execution.** Positions currently in liquidation sit in a per-pool ring queue with a round-robin cursor, so no position starves and no swap pays for more than `MAX_CHUNKS_PER_SWAP` (default 2) chunk executions. `poke(poolId)` lets anyone execute up to 10 more — this also covers quiet markets, where no swaps means no `afterSwap` (v1 had this stall latently; the chunk pacing formula's time multiplier makes missed intervals catch up, capped).
+A TWAMM (time-weighted AMM) executes one large order as many small slices spread over time. TrueLend's engine is a TWAMM with two twists that make it a *liquidation* machine:
 
-**One chunk does:** `swap` the chunk of collateral into the pool (a direct call from `afterSwap`; the hook's own callbacks are skipped by v4's `noSelfCall`, so there is no recursion and v1's reentrancy flag is deleted) → `donate` the penalty to in-range LPs → keep proceeds as ERC-6909 claims → repay the vault → update the position and emit.
+| | Canonical TWAMM | TrueLend chunk engine |
+|---|---|---|
+| Order | fixed size, submitted by a trader | "sell this position's collateral" — implied by the loan |
+| Runs | unconditionally until filled | **only while the pool tick is inside the position's liquidation range** — leaves range → pauses, re-enters → resumes |
+| Slice size | constant rate | adaptive: base 1% of *remaining* × time catch-up (≤5×) × (1+depth) × (1+pressure), hard-capped at 1% of measured book depth |
+| Execution | virtual orders computed each block | lazy: real swaps executed inside other users' `afterSwap`, or by permissionless `poke()` |
+| Purpose of pacing | price impact minimization | **anti-cascade guarantee**: bounded sell flow per interval per position |
 
-**Penalty (per chunk):**
+There is no schedule and no keeper *requirement*: the market's own activity drives execution, and `poke()` (with the time-multiplier catch-up) covers quiet markets.
 
+### 4.2 One chunk, step by step
+
+```mermaid
+sequenceDiagram
+    participant W as Swapper (anyone)
+    participant PM as PoolManager
+    participant H as TrueLendHook
+    participant V as LendingVault (debt side)
+    W->>PM: swap()
+    PM->>H: beforeSwap — record pre-swap tick (oracle)
+    PM->>PM: execute W's swap (price moves)
+    PM->>H: afterSwap
+    H->>H: walk trigger bitmap between lastTick and newTick<br/>(≤8 ticks, ≤32 position refreshes)
+    H->>H: toggle positions in/out of liquidation; queue them
+    loop up to 2 due chunks (round-robin queue)
+        H->>H: chunk = pacing formula; state updated FIRST (CEI)
+        H->>PM: swap(chunk of collateral) — direct call, hook callbacks skipped
+        H->>PM: settle collateral in
+        H->>PM: donate(penalty) → in-range LPs
+        H->>PM: take(proceeds − penalty)
+        H->>V: repay(net proceeds) → burns position debt shares
+        H->>H: close position if debt cleared / collateral exhausted
+    end
+    H->>H: lastTick = final tick
+    PM-->>W: W's swap settles normally (their execution untouched)
 ```
-penalty = proceeds × BASE_PENALTY(0.5%) × (LT / 100) × min(1 + timeInLiq/1h, 5)
+
+Two v4 facts make this sound: hook callbacks run with the PoolManager already unlocked, so the hook calls `swap`/`donate` directly (calling `unlock()` here was v1's fatal bug); and `noSelfCall` means the hook's own swaps skip its callbacks — no recursion.
+
+### 4.3 Detection: how crossings are found cheaply
+
+Each position registers two **trigger ticks** (range start, range end) in a per-pool bitmap over `tick/spacing`, plus a per-tick list of position ids. `afterSwap` walks only the *set bits* between the last processed tick and the current tick — a swap crossing no boundaries pays a few hundred gas; a swap crossing N boundaries pays O(N), capped at 8 ticks / 32 position refreshes per walk, with `processedTick` persisting the resume point. Position refresh is **idempotent** (it recomputes in-range status from the current tick), which is what makes capped/lazy/partial walks safe.
+
+### 4.4 What happens when pool liquidity thins out — or disappears
+
+Liquidity is the engine's counterparty, so every selling path is bounded by *measured* depth, in the same transaction it executes:
+
+- **Chunks**: size is capped at `maxChunkDepthBps` (1%) of the token depth of current in-range liquidity spread across the position's own range. Thin book → proportionally tiny chunks (the `pressure` term simultaneously speeds pacing so decay keeps up in more, smaller steps). **Zero in-range liquidity → the chunk is skipped entirely** (position waits; queue retains it).
+- **forceClose**: sells with a hard slippage bound — the sale may move the price at most ~10% (`FC_MAX_SLIPPAGE_TICKS = 1000`) from the current tick. In a drained or manipulated book the swap partially fills or fills nothing; the unfilled remainder stays as collateral, the position stays open, and the close is **retried** by anyone once liquidity returns. A fire sale into an empty book is structurally impossible (tested: `test_forceClose_drainedPool_noFireSale`).
+- **Penalty donation** is skipped when no liquidity is in range (v4's `donate` requires an in-range recipient); the penalty simply stays with the proceeds and repays more debt.
+
+### 4.5 What keeps the protocol solvent — the ladder
+
+Each layer only has to catch what the previous one lets through:
+
+```mermaid
+flowchart TB
+    L1["1 · Open-time gates<br/>worse-of(spot, truncated median) pricing · LTV ≤ 95% of LT ·<br/>min gap to range · oracle bootstrap · utilization cap 90%"]
+    L2["2 · In-range deleveraging<br/>every chunk REDUCES debt — a position that decays
+is getting healthier, not just smaller"]
+    L3["3 · Health backstop (forceClose #3)<br/>collateral at current price (less buffer) stops covering debt →
+permissionless close, slippage-bounded"]
+    L4["4 · Range-exhaustion / expiry (forceClose #1, #2)<br/>price outran the pacing, or term ended → close now"]
+    L5["5 · Declared waterfall<br/>vault reserves (10% of all interest) → pro-rata lender haircut,<br/>recorded on-chain as totalUncoveredShortfall"]
+    L1 --> L2 --> L3 --> L4 --> L5
 ```
 
-Scales with the risk the borrower chose and with how long LPs have been absorbing the flow; capped so late decay isn't confiscatory. Routed via `donate()` — this is the "LPs replace keepers and get paid for it" half of the protocol's pitch. (`donate` pays whoever is in range at that instant and can be JIT-diluted; acceptable for an incentive stream — it is never a solvency input.)
+The residual that reaches layer 5 is the tail borrowers *paid for*: high-LT positions pay LT-scaled, time-scaled penalties to LPs, and lenders earn utilization interest plus the reserve buffer against exactly this risk. Solvency is not a theorem here (a guaranteed-coverage rule would cap LT at ~70%, RESEARCH.md §6.5); it is a priced risk with bounded, declared loss paths.
 
-**Settlement plumbing.** All hook balances live as PoolManager ERC-6909 claims (no ERC-20 round-trips per chunk); `CurrencySettler` wraps mint/burn vs transfer/settle; `clear()` discards dust deltas.
+### 4.6 Who sets what
+
+| Set by | Parameter | Where |
+|---|---|---|
+| **Borrower**, per position | LT (50–99%) · LTV via borrow amount (≤ 95% of LT) · collateral side · size | `open()` args |
+| **Pool creator / hook owner**, per pool | range width (√2) · min gap (100 ticks) · max LT (99%) · base penalty (0.5%) · slippage buffer (2%) · chunk depth cap (1%) · target chunks (100) · chunk interval (60s) · time cap (5×) · term (180d) · forceClose reward (0.1%) · **minBorrow (must set!)** | `Config` via `setConfig` |
+| **Protocol constants** | LTV headroom 95% · min LT 50% · 2 chunks/swap, 10/poke · 8 ticks + 32 refreshes/walk · forceClose slippage 1000 ticks · oracle (60s interval, 9 obs, ±9116 truncation) | compiled in |
+| **VaultFactory constants** (IRM) | base 0% · slope 4% to kink 80% · +100% above · hard cap 90% · reserve factor 10% · rate ceiling 400% | compiled in |
+| **Market**, continuously | interest rate (via utilization) · liquidation execution prices (via the book) · decay speed (via swap activity + pokes) | — |
 
 ---
 

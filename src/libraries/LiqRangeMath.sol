@@ -27,7 +27,7 @@ library LiqRangeMath {
     /// @param debt          raw debt amount (include any buffer the caller wants)
     /// @param ltBps         liquidation threshold in bps (e.g. 9000 = 90%)
     function liquidationSqrtPriceX96(bool collateralIs0, uint256 collateral, uint256 debt, uint16 ltBps)
-        internal
+        public
         pure
         returns (uint160)
     {
@@ -61,7 +61,7 @@ library LiqRangeMath {
         uint16 ltBps,
         int24 rangeWidth,
         int24 tickSpacing
-    ) internal pure returns (int24 tickStart, int24 tickEnd) {
+    ) public pure returns (int24 tickStart, int24 tickEnd) {
         uint160 sqrtP = liquidationSqrtPriceX96(collateralIs0, collateral, debt, ltBps);
         int24 raw = TickMath.getTickAtSqrtPrice(sqrtP);
 

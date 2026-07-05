@@ -16,6 +16,7 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 
+import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {TrueLendHook} from "../src/TrueLendHook.sol";
 import {LendingVault} from "../src/LendingVault.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
@@ -143,10 +144,15 @@ contract TrueLendInvariantsTest is Test, Deployers {
         if (address(token0) > address(token1)) (token0, token1) = (token1, token0);
 
         VaultFactory factory = new VaultFactory();
-        address hookAddress =
-            address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG));
-        deployCodeTo("TrueLendHook.sol", abi.encode(address(manager), address(factory)), hookAddress);
-        hook = TrueLendHook(hookAddress);
+        // mine + CREATE2, exactly like production deployment (links libraries)
+        (address hookAddress, bytes32 hookSalt) = HookMiner.find(
+            address(this),
+            uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG),
+            type(TrueLendHook).creationCode,
+            abi.encode(address(manager), address(factory))
+        );
+        hook = new TrueLendHook{salt: hookSalt}(manager, factory);
+        require(address(hook) == hookAddress, "hook address mismatch");
 
         poolKey = PoolKey({
             currency0: Currency.wrap(address(token0)),

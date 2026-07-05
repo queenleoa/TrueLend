@@ -37,7 +37,7 @@ library TruncatedOracle {
         bool initialized;
     }
 
-    function initialize(State storage self, int24 tick, uint32 timestamp) internal {
+    function initialize(State storage self, int24 tick, uint32 timestamp) public {
         self.obs[0] = Observation({tick: tick, rawMin: tick, rawMax: tick, timestamp: timestamp});
         self.index = 0;
         self.count = 1;
@@ -47,7 +47,7 @@ library TruncatedOracle {
     }
 
     /// @notice Record the pre-swap tick. Cheap no-op path when inside the interval.
-    function observe(State storage self, int24 rawTick, uint32 timestamp) internal {
+    function observe(State storage self, int24 rawTick, uint32 timestamp) public {
         if (rawTick < self.pendingMin) self.pendingMin = rawTick;
         if (rawTick > self.pendingMax) self.pendingMax = rawTick;
 
@@ -71,12 +71,12 @@ library TruncatedOracle {
     }
 
     /// @notice True once the ring is fully populated (bootstrap gate for originations).
-    function ready(State storage self) internal view returns (bool) {
+    function ready(State storage self) public view returns (bool) {
         return self.count == CARDINALITY;
     }
 
     /// @notice Median of the recorded (truncated) ticks.
-    function medianTick(State storage self) internal view returns (int24) {
+    function medianTick(State storage self) public view returns (int24) {
         uint256 n = self.count;
         int24[] memory ticks = new int24[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -98,7 +98,7 @@ library TruncatedOracle {
     /// @notice The tick least favorable to a borrower whose collateral is
     /// currency0 (value rises with tick) or currency1 (value falls with tick).
     /// Takes the worse of {median, current spot, recent raw extremes}.
-    function borrowTick(State storage self, int24 spotTick, bool collateralIs0) internal view returns (int24 worst) {
+    function borrowTick(State storage self, int24 spotTick, bool collateralIs0) public view returns (int24 worst) {
         worst = medianTick(self);
         if (collateralIs0) {
             // lower tick = lower collateral valuation = worse for borrower
