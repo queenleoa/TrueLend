@@ -21,3 +21,21 @@ lint_on_build = true
 enabled = true
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[invariant]
+runs = 20
+depth = 40
+fail_on_revert = false
+
+[profile.ci]
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+ffi = true
+
+[profile.ci.invariant]
+runs = 20
+depth = 40
+fail_on_revert = false

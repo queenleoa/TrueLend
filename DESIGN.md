@@ -38,7 +38,7 @@ The liquidation range runs from $2,000 down to $2,000/√2 ≈ **$1,414** (defau
 
 ETH stays above $2,000: the hook does nothing for this position — no per-swap accounting, no storage touches. Alice can repay (partially or fully) at any time; full repayment returns her ETH.
 
-Interest accrues against her debt via the vault's borrow index. The loan carries a **term** (default 180 days) and was opened with enough headroom that interest at the rate ceiling cannot outgrow the range's coverage before expiry.
+Interest accrues against her debt via the vault's borrow index. The loan carries a **term** (default 180 days), and open-time LTV must sit at least 5% below the chosen LT (the headroom that keeps ordinary interest accrual from immediately eroding the position into its range). Interest beyond that is caught by the ongoing health backstop (§2.5).
 
 ### 2.3 Price enters the range — decay
 
@@ -68,7 +68,7 @@ Three conditions end the soft treatment, making the position closable by **anyon
 
 1. **Range exhausted**: the tick passed $1,414 with collateral still left — price outran the pacing, so pacing no longer protects anyone. Remaining collateral is sold in one bounded swap.
 2. **Expiry**: the term passed without repayment.
-3. **Coverage breach**: accrued interest approaches what the remaining collateral can repay even in the best case.
+3. **Health breach**: at the *current* price, the remaining collateral (after the slippage buffer) no longer covers the debt — interest erosion or a partial gap-through has made waiting strictly worse for lenders.
 
 Shortfalls, if any, hit the **bad-debt waterfall**: vault reserve buffer → pro-rata haircut of lenders' accrued interest → pro-rata haircut of principal. Declared in the contract, so lenders can price the tail.
 

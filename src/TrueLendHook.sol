@@ -6,736 +6,694 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
-import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+import {Currency} from "v4-core/types/Currency.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
-import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
+import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {console} from "forge-std/console.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
+import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 
-/**
- * @title TrueLend Oracleless Liquidation Hook
- * @notice AMM-native lending with TWAMM-style gradual liquidations
- */
+import {LendingVault} from "./LendingVault.sol";
+import {VaultFactory} from "./VaultFactory.sol";
+import {LiqRangeMath} from "./libraries/LiqRangeMath.sol";
+import {ChunkMath} from "./libraries/ChunkMath.sol";
+import {TruncatedOracle} from "./libraries/TruncatedOracle.sol";
+import {TriggerIndex} from "./libraries/TriggerIndex.sol";
+
+/// @title TrueLendHook
+/// @notice Oracleless lending on Uniswap v4 with gradual, reversible, chunked
+/// liquidations. See DESIGN.md. One hook instance serves many pools; every pool
+/// initialized with this hook automatically becomes a lending market with two
+/// LendingVaults (one per currency).
 contract TrueLendHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
-    using CurrencyLibrary for Currency;
     using CurrencySettler for Currency;
-    using FixedPointMathLib for uint256;
+    using SafeTransferLib for ERC20;
+    using TruncatedOracle for TruncatedOracle.State;
+    using TriggerIndex for TriggerIndex.State;
 
-    // Reentrancy lock to prevent hook from processing its own liquidation swaps
-    bool private _inLiquidationSwap;
+    // ------------------------------------------------------------------ constants
 
-    error OnlyLendingRouter();
-    error PositionNotActive();
-    error InsufficientCollateral();
-    error InvalidLiquidationThreshold();
+    uint256 internal constant BPS = 10_000;
+    uint256 internal constant YEAR = 365 days;
+    uint256 internal constant MAX_CHUNKS_PER_SWAP = 2;
+    uint256 internal constant MAX_CHUNKS_PER_POKE = 10;
+    uint256 internal constant MAX_TRIGGERS_PER_WALK = 8;
+    uint16 internal constant MIN_LT_BPS = 5000;
+    // open-time LTV must sit below the chosen LT by this factor (95%)
+    uint256 internal constant OPEN_LTV_HEADROOM_BPS = 9500;
 
-    event PositionCreated(
+    uint8 internal constant ACTION_POKE = 1;
+    uint8 internal constant ACTION_FORCE_CLOSE = 2;
+
+    // ------------------------------------------------------------------ types
+
+    struct Config {
+        int24 rangeWidth; // liquidation range width in ticks (pre-alignment)
+        int24 minGapTicks; // min distance from filtered price to range start
+        uint16 maxLtBps;
+        uint16 basePenaltyBps;
+        uint16 slippageBufferBps; // coverage haircut for chunk slippage
+        uint16 maxChunkDepthBps; // per-chunk cap as bps of in-range depth tokens
+        uint16 targetChunks;
+        uint32 chunkInterval;
+        uint8 timeCapX;
+        uint32 termSeconds;
+        uint16 rewardBps; // forceClose caller reward, taken out of the penalty
+        uint128 minBorrow; // dust floor, in debt-asset units
+    }
+
+    struct PoolState {
+        PoolKey key;
+        LendingVault vault0;
+        LendingVault vault1;
+        int24 processedTick; // triggers walked up to here
+        bool enabled;
+    }
+
+    struct Position {
+        address borrower;
+        PoolId poolId;
+        bool collateralIs0;
+        bool inQueue;
+        uint128 collateral; // remaining collateral held by the hook
+        uint128 debtShares; // vault debt shares outstanding
+        int24 tickStart;
+        int24 tickEnd;
+        uint16 ltBps;
+        uint40 expiry;
+        uint40 lastChunkAt;
+        uint40 liqStartedAt; // 0 when not in liquidation
+        uint40 timeInLiqAccrued; // completed episodes, seconds
+    }
+
+    // ------------------------------------------------------------------ storage
+
+    address public owner;
+    VaultFactory public immutable vaultFactory;
+
+    mapping(PoolId => PoolState) internal pools;
+    mapping(PoolId => Config) public configs;
+    mapping(PoolId => TruncatedOracle.State) internal oracles;
+    mapping(PoolId => TriggerIndex.State) internal triggers;
+    mapping(PoolId => bytes32[]) internal liqQueue;
+    mapping(PoolId => uint256) internal queueCursor;
+    mapping(bytes32 => Position) public positions;
+    uint256 internal positionNonce;
+    uint256 internal locked = 1;
+
+    // ------------------------------------------------------------------ events / errors
+
+    event PoolEnabled(PoolId indexed poolId, address vault0, address vault1);
+    event PositionOpened(
         bytes32 indexed positionId,
         address indexed borrower,
-        uint256 collateralAmount,
-        uint256 debtAmount,
-        int24 tickLower,
-        int24 tickUpper,
-        uint8 liquidationThreshold
+        PoolId indexed poolId,
+        bool collateralIs0,
+        uint256 collateral,
+        uint256 debt,
+        uint16 ltBps,
+        int24 tickStart,
+        int24 tickEnd,
+        uint40 expiry
     );
-
-    event LiquidationChunkExecuted(
-        bytes32 indexed positionId,
-        uint256 collateralLiquidated,
-        uint256 debtRepaid,
-        uint256 penaltyAmount,
-        int24 currentTick
+    event LiquidationStarted(bytes32 indexed positionId, int24 tick);
+    event LiquidationPaused(bytes32 indexed positionId, int24 tick, uint256 episodeSeconds);
+    event ChunkExecuted(
+        bytes32 indexed positionId, uint256 collateralSold, uint256 proceeds, uint256 penalty, uint256 debtRepaid
     );
+    event Repaid(bytes32 indexed positionId, address indexed payer, uint256 assetsUsed);
+    event PositionClosed(bytes32 indexed positionId, uint256 collateralReturned, uint256 shortfallWrittenOff);
+    event ForceClosed(bytes32 indexed positionId, address indexed caller, uint8 reason, uint256 reward);
 
-    event PositionFullyLiquidated(
-        bytes32 indexed positionId,
-        uint256 totalCollateralLiquidated,
-        uint256 totalDebtRepaid,
-        uint256 excessReturned
-    );
+    error NotOwner();
+    error Reentrancy();
+    error NativeNotSupported();
+    error PoolNotEnabled();
+    error OracleNotReady();
+    error LtOutOfBounds();
+    error AmountTooSmall();
+    error LtvTooHigh();
+    error GapTooSmall();
+    error CoverageInsufficient();
+    error PositionNotActive();
+    error NotEligibleForForceClose();
+    error UnknownAction();
 
-    event PositionRepaid(
-        bytes32 indexed positionId,
-        uint256 amountRepaid,
-        bool fullyRepaid
-    );
-
-    struct BorrowPosition {
-        address borrower;
-        address lendingRouter;
-        uint256 collateralAmount;
-        uint256 collateralRemaining;
-        uint256 debtAmount;
-        uint256 debtRepaid;
-        int24 tickLower;
-        int24 tickUpper;
-        uint160 sqrtPriceX96Initial;
-        uint256 creationTime;
-        uint256 lastLiquidationTime;
-        uint256 liquidationStartTime;
-        uint256 totalTimeInLiquidation;
-        uint8 liquidationThreshold;
-        uint16 interestRate;
-        bool needsLiquidation;
-        bool isActive;
+    modifier nonReentrant() {
+        if (locked != 1) revert Reentrancy();
+        locked = 2;
+        _;
+        locked = 1;
     }
 
-    struct LiquidationSwapData {
-        PoolKey poolKey;
-        bytes32 positionId;
-        uint256 amount;
-    }
-
-    // Constants
-    uint256 public constant BASE_PENALTY_RATE = 500;
-    uint256 public constant MAX_CHUNK_SIZE = 1000e18;
-    uint256 public constant MIN_CHUNK_SIZE = 10e18;
-    uint256 public constant TARGET_CHUNKS = 100;
-    uint256 public constant CHUNK_TIME_INTERVAL = 1 minutes;
-
-    // Storage
-    mapping(bytes32 => BorrowPosition) public positions;
-    mapping(PoolId => bytes32[]) public activePositions;
-    mapping(address => bool) public isLendingRouter;
-    mapping(PoolId => mapping(int24 => bytes32[])) internal positionsAtTick;
-    mapping(PoolId => int24[]) internal activeTicks;
-    mapping(PoolId => mapping(int24 => bool)) internal tickHasPositions;
-
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
-
-    function getHookPermissions()
-        public
-        pure
-        override
-        returns (Hooks.Permissions memory)
-    {
-        return
-            Hooks.Permissions({
-                beforeInitialize: false,
-                afterInitialize: false,
-                beforeAddLiquidity: false,
-                afterAddLiquidity: false,
-                beforeRemoveLiquidity: false,
-                afterRemoveLiquidity: false,
-                beforeSwap: true,
-                afterSwap: true,
-                beforeDonate: false,
-                afterDonate: false,
-                beforeSwapReturnDelta: false,
-                afterSwapReturnDelta: false,
-                afterAddLiquidityReturnDelta: false,
-                afterRemoveLiquidityReturnDelta: false
-            });
-    }
-
-    modifier onlyLendingRouter() {
-        if (!isLendingRouter[msg.sender]) revert OnlyLendingRouter();
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
 
-    function setLendingRouter(address router, bool approved) external {
-        isLendingRouter[router] = approved;
+    constructor(IPoolManager _poolManager, VaultFactory _factory) BaseHook(_poolManager) {
+        owner = msg.sender;
+        vaultFactory = _factory;
     }
 
-    function _beforeSwap(
-        address,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        bytes calldata
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        // Skip hook logic if this is a liquidation swap from the hook itself
-        if (_inLiquidationSwap) {
-            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-        
-        // Don't estimate - we'll check actual tick in afterSwap
-        // Estimation with concentrated liquidity is too unreliable
-        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: true,
+            beforeAddLiquidity: false,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: true,
+            afterSwap: true,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
     }
 
-    function _afterSwap(
-        address,
-        PoolKey calldata key,
-        SwapParams calldata,
-        BalanceDelta,
-        bytes calldata
-    ) internal override returns (bytes4, int128) {
-        // Check actual tick and activate/deactivate liquidations based on reality
-        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
-        _checkAndToggleLiquidations(key, currentTick);
-        
-        // Execute any active liquidation chunks
-        _executeLiquidationChunks(key);
-        return (this.afterSwap.selector, 0);
-    }
+    // ------------------------------------------------------------------ hook callbacks
 
-    function _checkAndToggleLiquidations(
-        PoolKey calldata key,
-        int24 currentTick
-    ) internal {
+    function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
+        if (key.currency0.isAddressZero()) revert NativeNotSupported();
         PoolId poolId = key.toId();
-        int24[] memory ticks = activeTicks[poolId];
 
-        for (uint i = 0; i < ticks.length; i++) {
-            int24 tick = ticks[i];
-            bytes32[] memory posIds = positionsAtTick[poolId][tick];
-            
-            for (uint j = 0; j < posIds.length; j++) {
-                BorrowPosition storage pos = positions[posIds[j]];
-                if (!pos.isActive) continue;
-                
-                // Check if we're in liquidation range
-                bool inRange = (currentTick >= pos.tickLower && currentTick <= pos.tickUpper);
-                
-                if (inRange && !pos.needsLiquidation) {
-                    // Entered liquidation range
-                    pos.needsLiquidation = true;
-                    pos.liquidationStartTime = block.timestamp;
-                    pos.lastLiquidationTime = block.timestamp - CHUNK_TIME_INTERVAL;
-                } else if (!inRange && pos.needsLiquidation) {
-                    // Exited liquidation range
-                    pos.needsLiquidation = false;
-                    pos.totalTimeInLiquidation += (block.timestamp - pos.liquidationStartTime);
-                }
-            }
-        }
+        ERC20 asset0 = ERC20(Currency.unwrap(key.currency0));
+        ERC20 asset1 = ERC20(Currency.unwrap(key.currency1));
+        LendingVault v0 = vaultFactory.deploy(asset0, address(this));
+        LendingVault v1 = vaultFactory.deploy(asset1, address(this));
+        asset0.safeApprove(address(v0), type(uint256).max);
+        asset1.safeApprove(address(v1), type(uint256).max);
+
+        pools[poolId] = PoolState({key: key, vault0: v0, vault1: v1, processedTick: tick, enabled: true});
+        configs[poolId] = Config({
+            rangeWidth: 3466, // price factor ~sqrt(2)
+            minGapTicks: 100,
+            maxLtBps: 9900,
+            basePenaltyBps: 50,
+            slippageBufferBps: 200,
+            maxChunkDepthBps: 100,
+            targetChunks: 100,
+            chunkInterval: 60,
+            timeCapX: 5,
+            termSeconds: 180 days,
+            rewardBps: 10,
+            minBorrow: 0
+        });
+        oracles[poolId].initialize(tick, uint32(block.timestamp));
+
+        emit PoolEnabled(poolId, address(v0), address(v1));
+        return BaseHook.afterInitialize.selector;
     }
 
-    function _executeLiquidationChunks(PoolKey calldata key) internal {
+    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        // record the PRE-swap tick: a single swap can never write its own price
         PoolId poolId = key.toId();
-        bytes32[] memory activePos = activePositions[poolId];
-        (, int24 currentTick, , ) = poolManager.getSlot0(poolId);
-
-        for (uint i = 0; i < activePos.length; i++) {
-            BorrowPosition storage pos = positions[activePos[i]];
-
-            if (!pos.isActive || !pos.needsLiquidation) continue;
-            if (pos.collateralRemaining == 0) continue;
-
-            uint256 chunkSize = _calculateChunkSize(pos, key, currentTick);
-            if (chunkSize < MIN_CHUNK_SIZE) continue;
-
-            _executeSingleChunk(key, activePos[i], chunkSize);
-            _checkPositionStatus(key, activePos[i]);
-        }
+        (, int24 tick,,) = poolManager.getSlot0(poolId);
+        oracles[poolId].observe(tick, uint32(block.timestamp));
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
-    function _calculateChunkSize(
-        BorrowPosition storage pos,
+    function _afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
+        internal
+        override
+        returns (bytes4, int128)
+    {
+        PoolId poolId = key.toId();
+        _walkTriggers(key, poolId);
+        _processQueue(key, poolId, MAX_CHUNKS_PER_SWAP);
+        _walkTriggers(key, poolId); // chunks move the tick; pick up newly crossed triggers
+        return (BaseHook.afterSwap.selector, 0);
+    }
+
+    // ------------------------------------------------------------------ borrower entrypoints
+
+    /// @notice Open a loan: deposit collateral in one pool currency, borrow the other.
+    function open(
         PoolKey calldata key,
-        int24 currentTick
-    ) internal view returns (uint256) {
-        uint256 timeSinceLastChunk = block.timestamp - pos.lastLiquidationTime;
-        if (timeSinceLastChunk < CHUNK_TIME_INTERVAL) return 0;
+        bool collateralIs0,
+        uint256 collateralAmount,
+        uint256 borrowAmount,
+        uint16 ltBps
+    ) external nonReentrant returns (bytes32 positionId) {
+        PoolId poolId = key.toId();
+        PoolState storage pool = pools[poolId];
+        Config memory cfg = configs[poolId];
+        if (!pool.enabled) revert PoolNotEnabled();
+        if (!oracles[poolId].ready()) revert OracleNotReady();
+        if (ltBps < MIN_LT_BPS || ltBps > cfg.maxLtBps) revert LtOutOfBounds();
+        if (collateralAmount == 0 || borrowAmount == 0 || borrowAmount < cfg.minBorrow) revert AmountTooSmall();
 
-        uint256 baseChunk = pos.collateralRemaining / TARGET_CHUNKS;
-        if (baseChunk < MIN_CHUNK_SIZE) baseChunk = pos.collateralRemaining;
+        (, int24 spotTick,,) = poolManager.getSlot0(poolId);
 
-        uint256 timeMultiplier = (timeSinceLastChunk * 10000) /
-            CHUNK_TIME_INTERVAL;
-        if (timeMultiplier > 50000) timeMultiplier = 50000;
-
-        uint256 depthIntoRange = 0;
-        
-        if (currentTick >= pos.tickLower && currentTick <= pos.tickUpper) {
-            int24 rangeWidth = pos.tickUpper - pos.tickLower;
-            
-            if (rangeWidth > 0) {
-                int24 depthTicks = currentTick - pos.tickLower;
-                
-                if (depthTicks >= 0) {
-                    uint256 depthTicksUint = uint256(int256(depthTicks));
-                    uint256 rangeWidthUint = uint256(int256(rangeWidth));
-                    
-                    if (depthTicksUint <= rangeWidthUint) {
-                        depthIntoRange = (depthTicksUint * 10000) / rangeWidthUint;
-                    } else {
-                        depthIntoRange = 10000;
-                    }
-                }
-            }
+        // 1. initial LTV at the manipulation-resistant, borrower-adverse price,
+        //    with headroom below the chosen LT so interest accrual doesn't
+        //    immediately erode the position into its range
+        {
+            int24 worstTick = oracles[poolId].borrowTick(spotTick, collateralIs0);
+            uint160 worstSqrtP = TickMath.getSqrtPriceAtTick(worstTick);
+            uint256 collValueInDebt = LiqRangeMath.convertAtSqrtPrice(collateralAmount, worstSqrtP, collateralIs0);
+            if (
+                collValueInDebt == 0
+                    || FullMath.mulDiv(borrowAmount, BPS * BPS, collValueInDebt)
+                        > uint256(ltBps) * OPEN_LTV_HEADROOM_BPS
+            ) revert LtvTooHigh();
         }
 
-        uint128 poolLiquidity = poolManager.getLiquidity(key.toId());
-        uint256 positionLiquidityEquiv = pos.collateralRemaining;
-        uint256 liquidityPressure = poolLiquidity > 0
-            ? (positionLiquidityEquiv * 10000) / uint256(poolLiquidity)
-            : 0;
-        if (liquidityPressure > 10000) liquidityPressure = 10000;
-
-        uint256 chunkSize = baseChunk
-            .mulDivDown(timeMultiplier, 10000)
-            .mulDivDown(10000 + depthIntoRange, 10000)
-            .mulDivDown(10000 + liquidityPressure, 10000);
-
-        if (chunkSize > MAX_CHUNK_SIZE) chunkSize = MAX_CHUNK_SIZE;
-        if (chunkSize > pos.collateralRemaining)
-            chunkSize = pos.collateralRemaining;
-
-        return chunkSize;
-    }
-
-    function _executeSingleChunk(
-        PoolKey calldata key,
-        bytes32 positionId,
-        uint256 chunkSize
-    ) internal {
-        poolManager.unlock(
-            abi.encode(
-                LiquidationSwapData({
-                    poolKey: key,
-                    positionId: positionId,
-                    amount: chunkSize
-                })
-            )
+        // 2. place the liquidation range
+        (int24 tickStart, int24 tickEnd) = LiqRangeMath.liquidationRange(
+            collateralIs0, collateralAmount, borrowAmount, ltBps, cfg.rangeWidth, key.tickSpacing
         );
-    }
-
-    function unlockCallback(
-        bytes calldata data
-    ) external onlyPoolManager returns (bytes memory) {
-        LiquidationSwapData memory swapData = abi.decode(
-            data,
-            (LiquidationSwapData)
-        );
-        BorrowPosition storage pos = positions[swapData.positionId];
-
-        IERC20(Currency.unwrap(swapData.poolKey.currency1)).approve(
-            address(poolManager),
-            swapData.amount
-        );
-
-        swapData.poolKey.currency1.settle(
-            poolManager,
-            address(this),
-            swapData.amount,
-            false
-        );
-
-        // Set reentrancy lock to prevent this swap from triggering hook logic
-        _inLiquidationSwap = true;
-        
-        BalanceDelta swapDelta = poolManager.swap(
-            swapData.poolKey,
-            SwapParams({
-                zeroForOne: false,
-                amountSpecified: -int256(swapData.amount),
-                sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
-            }),
-            ""
-        );
-        
-        // Clear reentrancy lock
-        _inLiquidationSwap = false;
-
-        uint256 ethReceived = uint256(uint128(-swapDelta.amount0()));
-        swapData.poolKey.currency0.take(
-            poolManager,
-            address(this),
-            ethReceived,
-            false
-        );
-
-        uint256 penalty = _calculatePenalty(pos, swapData.amount, ethReceived);
-
-        if (penalty > 0 && penalty < ethReceived) {
-            IERC20(Currency.unwrap(swapData.poolKey.currency0)).approve(
-                address(poolManager),
-                penalty
-            );
-            
-            poolManager.donate(
-                swapData.poolKey,
-                penalty,
-                0,
-                ""
-            );
-
-            swapData.poolKey.currency0.settle(
-                poolManager,
-                address(this),
-                penalty,
-                false
-            );
-
-            ethReceived -= penalty;
+        if (collateralIs0) {
+            if (tickStart > spotTick - cfg.minGapTicks) revert GapTooSmall();
+        } else {
+            if (tickStart < spotTick + cfg.minGapTicks) revert GapTooSmall();
         }
 
-        pos.collateralRemaining -= swapData.amount;
-        pos.debtRepaid += ethReceived;
-        pos.lastLiquidationTime = block.timestamp;
+        // 3. move funds and register
+        LendingVault vault = collateralIs0 ? pool.vault1 : pool.vault0;
+        ERC20(Currency.unwrap(collateralIs0 ? key.currency0 : key.currency1))
+            .safeTransferFrom(msg.sender, address(this), collateralAmount);
+        uint256 debtShares = vault.borrow(borrowAmount, msg.sender);
 
-        (, int24 currentTick, , ) = poolManager.getSlot0(
-            swapData.poolKey.toId()
+        positionId = keccak256(abi.encodePacked(msg.sender, PoolId.unwrap(poolId), positionNonce++));
+        positions[positionId] = Position({
+            borrower: msg.sender,
+            poolId: poolId,
+            collateralIs0: collateralIs0,
+            inQueue: false,
+            collateral: uint128(collateralAmount),
+            debtShares: uint128(debtShares),
+            tickStart: tickStart,
+            tickEnd: tickEnd,
+            ltBps: ltBps,
+            expiry: uint40(block.timestamp + cfg.termSeconds),
+            lastChunkAt: 0,
+            liqStartedAt: 0,
+            timeInLiqAccrued: 0
+        });
+        triggers[poolId].register(tickStart, key.tickSpacing, positionId);
+        triggers[poolId].register(tickEnd, key.tickSpacing, positionId);
+
+        emit PositionOpened(
+            positionId,
+            msg.sender,
+            poolId,
+            collateralIs0,
+            collateralAmount,
+            borrowAmount,
+            ltBps,
+            tickStart,
+            tickEnd,
+            uint40(block.timestamp + cfg.termSeconds)
         );
 
-        emit LiquidationChunkExecuted(
-            swapData.positionId,
-            swapData.amount,
-            ethReceived,
-            penalty,
-            currentTick
-        );
+        // safety: opening straight into the range is prevented by the gap check,
+        // but refresh anyway so state can never desync
+        _refreshPosition(positionId, spotTick);
+    }
 
+    /// @notice Repay debt (anyone can pay for any position). Full repayment closes
+    /// the position and returns remaining collateral to the borrower.
+    function repay(bytes32 positionId, uint256 assets) external nonReentrant {
+        Position storage pos = positions[positionId];
+        if (pos.borrower == address(0)) revert PositionNotActive();
+        if (assets == 0) revert AmountTooSmall();
+        PoolState storage pool = pools[pos.poolId];
+        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+
+        ERC20 debtAsset = vault.asset();
+        debtAsset.safeTransferFrom(msg.sender, address(this), assets);
+        (uint256 burned, uint256 used) = vault.repay(assets, pos.debtShares);
+        pos.debtShares -= uint128(burned);
+        if (assets > used) debtAsset.safeTransfer(msg.sender, assets - used); // refund excess
+
+        emit Repaid(positionId, msg.sender, used);
+        if (pos.debtShares == 0) _closePosition(positionId, 0);
+    }
+
+    /// @notice Execute pending liquidation chunks without waiting for a swap.
+    function poke(PoolKey calldata key) external nonReentrant {
+        if (!pools[key.toId()].enabled) revert PoolNotEnabled();
+        poolManager.unlock(abi.encode(ACTION_POKE, bytes32(0), key.toId(), msg.sender));
+    }
+
+    /// @notice Hard backstop: close a position whose soft treatment has ended.
+    /// Eligible when (1) price passed the far end of the range with collateral
+    /// left, (2) the term expired, or (3) interest outgrew worst-case coverage.
+    function forceClose(bytes32 positionId) external nonReentrant {
+        Position storage pos = positions[positionId];
+        if (pos.borrower == address(0)) revert PositionNotActive();
+        if (_forceCloseReason(positionId) == 0) revert NotEligibleForForceClose();
+        poolManager.unlock(abi.encode(ACTION_FORCE_CLOSE, positionId, pos.poolId, msg.sender));
+    }
+
+    /// @notice Force-close eligibility: 0 = not eligible, 1 = range exhausted,
+    /// 2 = expired, 3 = coverage breached.
+    function forceCloseReason(bytes32 positionId) external view returns (uint8) {
+        return _forceCloseReason(positionId);
+    }
+
+    // ------------------------------------------------------------------ unlock callback
+
+    function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
+        (uint8 action, bytes32 positionId, PoolId poolId, address caller) =
+            abi.decode(data, (uint8, bytes32, PoolId, address));
+        PoolState storage pool = pools[poolId];
+
+        if (action == ACTION_POKE) {
+            _walkTriggers(pool.key, poolId);
+            _processQueue(pool.key, poolId, MAX_CHUNKS_PER_POKE);
+            _walkTriggers(pool.key, poolId);
+        } else if (action == ACTION_FORCE_CLOSE) {
+            _executeForceClose(pool.key, positionId, caller);
+        } else {
+            revert UnknownAction();
+        }
         return "";
     }
 
-    function _calculatePenalty(
-        BorrowPosition storage pos,
-        uint256 /* collateralLiquidated */,
-        uint256 ethReceived
-    ) internal view returns (uint256) {
-        if (ethReceived == 0) return 0;
-        
-        uint256 ltFactor = (uint256(pos.liquidationThreshold) * 10000) / 100;
-        uint256 timeInLiquidation = block.timestamp - pos.liquidationStartTime;
-        uint256 timeFactor = 10000 + (timeInLiquidation * 100) / 1 hours;
-        if (timeFactor > 50000) timeFactor = 50000;
+    // ------------------------------------------------------------------ trigger walking
 
-        uint256 penalty = ethReceived
-            .mulDivDown(BASE_PENALTY_RATE, 10000)
-            .mulDivDown(ltFactor, 10000)
-            .mulDivDown(timeFactor, 10000);
+    function _walkTriggers(PoolKey memory key, PoolId poolId) internal {
+        PoolState storage pool = pools[poolId];
+        (, int24 tick,,) = poolManager.getSlot0(poolId);
+        int24 from = pool.processedTick;
+        if (tick == from) return;
 
-        return penalty;
-    }
-
-    function _checkPositionStatus(
-        PoolKey calldata /* key */,
-        bytes32 positionId
-    ) internal {
-        BorrowPosition storage pos = positions[positionId];
-        uint256 totalDebt = _calculateTotalDebt(pos);
-
-        if (pos.collateralRemaining == 0) {
-            pos.isActive = false;
-            pos.needsLiquidation = false;
-
-            emit PositionFullyLiquidated(
-                positionId,
-                pos.collateralAmount,
-                pos.debtRepaid,
-                pos.debtRepaid > totalDebt ? pos.debtRepaid - totalDebt : 0
-            );
-            return;
-        }
-
-        if (pos.debtRepaid >= totalDebt) {
-            pos.isActive = false;
-            pos.needsLiquidation = false;
-
-            emit PositionFullyLiquidated(
-                positionId,
-                pos.collateralAmount - pos.collateralRemaining,
-                pos.debtRepaid,
-                pos.collateralRemaining
-            );
-        }
-    }
-
-    function createPosition(
-        PoolKey calldata key,
-        address borrower,
-        uint256 collateralAmount,
-        uint256 debtAmount,
-        uint8 liquidationThreshold
-    ) external onlyLendingRouter returns (bytes32 positionId) {
-        if (collateralAmount == 0 || debtAmount == 0)
-            revert InsufficientCollateral();
-        if (liquidationThreshold > 99 || liquidationThreshold < 50)
-            revert InvalidLiquidationThreshold();
-
-        (uint160 sqrtPriceX96Current, int24 currentTick, , ) = poolManager
-            .getSlot0(key.toId());
-
-        (int24 tickLower, int24 tickUpper) = _calculateLiquidationTicks(
-            sqrtPriceX96Current,
-            currentTick,
-            liquidationThreshold,
-            collateralAmount,
-            debtAmount
-        );
-
-        positionId = keccak256(
-            abi.encodePacked(
-                borrower,
-                msg.sender,
-                block.timestamp,
-                collateralAmount,
-                debtAmount
-            )
-        );
-
-        require(
-            IERC20(Currency.unwrap(key.currency1)).transferFrom(
-                msg.sender,
-                address(this),
-                collateralAmount
-            ),
-            "Collateral transfer failed"
-        );
-
-        positions[positionId] = BorrowPosition({
-            borrower: borrower,
-            lendingRouter: msg.sender,
-            collateralAmount: collateralAmount,
-            collateralRemaining: collateralAmount,
-            debtAmount: debtAmount,
-            debtRepaid: 0,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            sqrtPriceX96Initial: sqrtPriceX96Current,
-            creationTime: block.timestamp,
-            lastLiquidationTime: block.timestamp,
-            liquidationStartTime: 0,
-            totalTimeInLiquidation: 0,
-            liquidationThreshold: liquidationThreshold,
-            interestRate: 500,
-            needsLiquidation: false,
-            isActive: true
-        });
-
-        activePositions[key.toId()].push(positionId);
-        positionsAtTick[key.toId()][tickLower].push(positionId);
-
-        if (!tickHasPositions[key.toId()][tickLower]) {
-            activeTicks[key.toId()].push(tickLower);
-            tickHasPositions[key.toId()][tickLower] = true;
-        }
-
-        require(
-            IERC20(Currency.unwrap(key.currency0)).transfer(borrower, debtAmount),
-            "Debt transfer failed"
-        );
-
-        emit PositionCreated(
-            positionId,
-            borrower,
-            collateralAmount,
-            debtAmount,
-            tickLower,
-            tickUpper,
-            liquidationThreshold
-        );
-    }
-
-    function repayDebt(
-        PoolKey calldata /* key */,
-        bytes32 positionId,
-        uint256 repayAmount
-    ) external {
-        BorrowPosition storage pos = positions[positionId];
-        if (!pos.isActive) revert PositionNotActive();
-
-        pos.debtRepaid += repayAmount;
-
-        uint256 totalDebt = _calculateTotalDebt(pos);
-        bool fullyRepaid = pos.debtRepaid >= totalDebt;
-
-        if (fullyRepaid) {
-            pos.isActive = false;
-            pos.needsLiquidation = false;
-        }
-
-        emit PositionRepaid(positionId, repayAmount, fullyRepaid);
-    }
-
-    function _calculateLiquidationTicks(
-        uint160 sqrtPriceX96Current,
-        int24 /* currentTick */,
-        uint8 liquidationThreshold,
-        uint256 collateralAmount,
-        uint256 debtAmount
-    ) internal pure returns (int24 tickLower, int24 tickUpper) {
-        uint256 liquidationPrice = FullMath.mulDiv(
-            uint256(liquidationThreshold) * collateralAmount,
-            1,
-            debtAmount * 100
-        );
-
-        uint160 sqrtPriceLiquidation = uint160(
-            FixedPointMathLib.sqrt(liquidationPrice) << 96
-        );
-
-        tickLower = TickMath.getTickAtSqrtPrice(sqrtPriceLiquidation);
-
-        uint160 sqrtPriceUpper = uint160(
-            (uint256(sqrtPriceLiquidation) * 14142) / 10000
-        );
-        tickUpper = TickMath.getTickAtSqrtPrice(sqrtPriceUpper);
-
-        if (tickLower > TickMath.MAX_TICK) tickLower = TickMath.MAX_TICK;
-        if (tickUpper > TickMath.MAX_TICK) tickUpper = TickMath.MAX_TICK;
-        if (tickLower < TickMath.MIN_TICK) tickLower = TickMath.MIN_TICK;
-        if (tickUpper < TickMath.MIN_TICK) tickUpper = TickMath.MIN_TICK;
-        
-        if (tickUpper <= tickLower) {
-            tickUpper = tickLower + 600;
-            if (tickUpper > TickMath.MAX_TICK) tickUpper = TickMath.MAX_TICK;
-        }
-    }
-
-    /**
-     * @notice Estimate new tick after swap with non-linear scaling for large swaps
-     * @dev Uses progressive multipliers based on swap size relative to liquidity
-     */
-    function _estimateNewTick(
-        PoolKey calldata key,
-        SwapParams calldata params,
-        int24 currentTick
-    ) internal view returns (int24) {
-        uint128 liquidity = poolManager.getLiquidity(key.toId());
-        console.log("_estimateNewTick called:");
-        console.log("  liquidity:", liquidity);
-        console.log("  currentTick:", uint256(int256(currentTick)));
-        
-        if (liquidity == 0) return currentTick;
-        
-        int256 amount = params.amountSpecified;
-        console.log("  amount (int256):", uint256(amount < 0 ? -amount : amount));
-        console.log("  amount is negative:", amount < 0);
-        
-        if (amount == 0) return currentTick;
-        
-        // For very large swaps relative to liquidity, they'll move price dramatically
-        uint256 absAmount = amount < 0 ? uint256(-amount) : uint256(amount);
-        uint256 liquidityUint = uint256(liquidity);
-        
-        console.log("  absAmount:", absAmount);
-        console.log("  liquidityUint:", liquidityUint);
-        console.log("  absAmount > liquidityUint/2?:", absAmount > liquidityUint / 2);
-        
-        // If swap is > 50% of liquidity, expect massive price movement
-        // BUT: with concentrated liquidity, we'll likely hit range boundaries
-        // So cap the estimate more conservatively
-        if (absAmount > liquidityUint / 2) {
-            console.log("  BRANCH: Large swap (>50% liquidity)");
-            // For concentrated liquidity, large swaps will hit range boundaries
-            // Don't assume we'll reach the price limit - estimate more conservatively
-            
-            // Estimate ~50-60% of max possible movement since liquidity will decrease
-            // as we move through ranges
-            if (params.sqrtPriceLimitX96 != 0) {
-                int24 limitTick = TickMath.getTickAtSqrtPrice(params.sqrtPriceLimitX96);
-                console.log("  limitTick:", uint256(int256(limitTick)));
-                int24 movementToLimit = limitTick - currentTick;
-                console.log("  movementToLimit:", uint256(int256(movementToLimit)));
-                
-                // Only expect to move ~50% of the way due to liquidity decreasing
-                // in wider ranges (conservative estimate for concentrated liquidity)
-                int24 conservativeEstimate = currentTick + (movementToLimit / 2);
-                console.log("  Conservative estimate (50% of limit):", uint256(int256(conservativeEstimate)));
-                return conservativeEstimate;
-            } else {
-                // No limit specified, estimate moderate movement
-                // Don't go crazy - concentrated liquidity means less movement
-                int24 moderateMove = params.zeroForOne ? int24(-30000) : int24(30000);
-                return currentTick + moderateMove;
+        (int24[] memory crossed, uint256 n, int24 walkedTo) =
+            triggers[poolId].crossedTriggers(from, tick, key.tickSpacing, MAX_TRIGGERS_PER_WALK);
+        for (uint256 i = 0; i < n; i++) {
+            bytes32[] storage ids = triggers[poolId].idsAtTick(crossed[i]);
+            uint256 m = ids.length;
+            for (uint256 j = 0; j < m; j++) {
+                _refreshPosition(ids[j], tick);
             }
         }
-        
-        console.log("  BRANCH: Normal swap (<50% liquidity)");
-        // For smaller swaps, use non-linear approximation
-        int256 liquidityInt = int256(liquidityUint);
-        
-        // Calculate basis points (amount * 10000 / liquidity)
-        int256 bps = (amount * 10000) / liquidityInt;
-        int256 absBps = bps < 0 ? -bps : bps;
-        
-        console.log("  bps:", uint256(absBps));
-        console.log("  (Direction will come from zeroForOne parameter)");
-        
-        // Non-linear scaling based on swap size
-        // Use ABSOLUTE value for calculation - direction comes from zeroForOne only
-        // IMPORTANT: For concentrated liquidity, scale down estimates by ~50%
-        // because liquidity decreases as we move through ranges
-        int256 estimatedMoveInt;
-        
-        if (absBps < 100) {
-            // < 1% of liquidity: roughly linear, ~10 ticks per bp
-            estimatedMoveInt = int256(absBps) * 10;
-            console.log("  Using 10x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
-        } else if (absBps < 1000) {
-            // 1-10% of liquidity: accelerating impact
-            estimatedMoveInt = int256(absBps) * 50;
-            console.log("  Using 50x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
-        } else if (absBps < 5000) {
-            // 10-50% of liquidity: strong exponential impact
-            estimatedMoveInt = int256(absBps) * 200;
-            console.log("  Using 200x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
+        pool.processedTick = walkedTo;
+    }
+
+    /// @dev Recompute a position's liquidation status from the current tick.
+    /// Idempotent; safe to call for any active position at any time.
+    function _refreshPosition(bytes32 positionId, int24 tick) internal {
+        Position storage pos = positions[positionId];
+        if (pos.borrower == address(0)) return;
+
+        bool inR = LiqRangeMath.inRange(pos.collateralIs0, tick, pos.tickStart, pos.tickEnd);
+        if (inR && pos.liqStartedAt == 0) {
+            pos.liqStartedAt = uint40(block.timestamp);
+            // first chunk becomes due immediately
+            pos.lastChunkAt = uint40(block.timestamp - configs[pos.poolId].chunkInterval);
+            if (!pos.inQueue) {
+                pos.inQueue = true;
+                liqQueue[pos.poolId].push(positionId);
+            }
+            emit LiquidationStarted(positionId, tick);
+        } else if (!inR && pos.liqStartedAt != 0) {
+            uint256 episode = block.timestamp - pos.liqStartedAt;
+            pos.timeInLiqAccrued += uint40(episode);
+            pos.liqStartedAt = 0;
+            emit LiquidationPaused(positionId, tick, episode);
+            // stays in the queue; removed lazily by _processQueue
+        }
+    }
+
+    // ------------------------------------------------------------------ chunk engine
+
+    function _processQueue(PoolKey memory key, PoolId poolId, uint256 maxChunks) internal {
+        bytes32[] storage queue = liqQueue[poolId];
+        uint256 executed;
+        uint256 scanned;
+        uint256 maxScan = maxChunks * 3 + 2;
+
+        while (executed < maxChunks && scanned < maxScan && queue.length > 0) {
+            uint256 cursor = queueCursor[poolId];
+            if (cursor >= queue.length) {
+                cursor = 0;
+            }
+            bytes32 positionId = queue[cursor];
+            Position storage pos = positions[positionId];
+            scanned++;
+
+            // lazy removal: closed or currently out of range -> drop from queue
+            if (pos.borrower == address(0) || pos.liqStartedAt == 0) {
+                pos.inQueue = false;
+                queue[cursor] = queue[queue.length - 1];
+                queue.pop();
+                continue; // same cursor now holds a different entry (or shrank)
+            }
+
+            if (_executeChunk(key, positionId)) executed++;
+            queueCursor[poolId] = cursor + 1;
+        }
+    }
+
+    /// @dev Sell one due chunk of collateral into the pool. Returns true if a
+    /// chunk was executed. Assumes unlocked PoolManager context.
+    function _executeChunk(PoolKey memory key, bytes32 positionId) internal returns (bool) {
+        Position storage pos = positions[positionId];
+        PoolId poolId = pos.poolId;
+        Config memory cfg = configs[poolId];
+        (, int24 tick,,) = poolManager.getSlot0(poolId);
+
+        // depth of in-range liquidity across this position's own range, measured
+        // in collateral-token units: pressure metric + per-chunk impact cap
+        uint256 depthTokens = _rangeDepthTokens(poolId, pos);
+        if (depthTokens == 0) return false; // no liquidity to sell into
+
+        uint256 chunk = ChunkMath.chunkSize(
+            ChunkMath.Params({
+                remaining: pos.collateral,
+                targetChunks: cfg.targetChunks,
+                elapsed: block.timestamp - pos.lastChunkAt,
+                interval: cfg.chunkInterval,
+                timeCapX: cfg.timeCapX,
+                depthBps: LiqRangeMath.depthBps(pos.collateralIs0, tick, pos.tickStart, pos.tickEnd),
+                pressureBps: FullMath.mulDiv(pos.collateral, BPS, depthTokens),
+                minChunk: 0,
+                maxChunk: FullMath.mulDiv(depthTokens, cfg.maxChunkDepthBps, BPS)
+            })
+        );
+        if (chunk == 0) return false;
+
+        (uint256 proceeds, uint256 penalty) = _swapCollateral(key, pos, chunk, _currentPenaltyBps(pos, cfg));
+
+        pos.collateral -= uint128(chunk);
+        pos.lastChunkAt = uint40(block.timestamp);
+
+        // repay the vault with net proceeds
+        PoolState storage pool = pools[poolId];
+        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+        uint256 net = proceeds - penalty;
+        uint256 used;
+        uint256 burned;
+        if (net > 0) {
+            (burned, used) = vault.repay(net, pos.debtShares);
+            pos.debtShares -= uint128(burned);
+            if (net > used) {
+                // debt fully repaid mid-chunk: excess proceeds belong to the borrower
+                vault.asset().safeTransfer(pos.borrower, net - used);
+            }
+        }
+        emit ChunkExecuted(positionId, chunk, proceeds, penalty, used);
+
+        if (pos.debtShares == 0) {
+            _closePosition(positionId, 0);
+        } else if (pos.collateral == 0) {
+            _closePosition(positionId, pos.debtShares); // bad debt: write off remainder
+        }
+        return true;
+    }
+
+    /// @dev Swap `amount` of the position's collateral into the debt currency and
+    /// donate the penalty to in-range LPs. Settles all deltas. Returns gross
+    /// proceeds and the penalty actually donated.
+    function _swapCollateral(PoolKey memory key, Position storage pos, uint256 amount, uint256 penaltyBps_)
+        internal
+        returns (uint256 proceeds, uint256 penalty)
+    {
+        bool zeroForOne = pos.collateralIs0;
+        BalanceDelta delta = poolManager.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amount), // exact input
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            ""
+        );
+        proceeds = uint256(uint128(zeroForOne ? delta.amount1() : delta.amount0()));
+
+        // pay the collateral in
+        (zeroForOne ? key.currency0 : key.currency1).settle(poolManager, address(this), amount, false);
+
+        // donate penalty to in-range LPs (skip if pool momentarily has no active liquidity)
+        penalty = FullMath.mulDiv(proceeds, penaltyBps_, BPS);
+        if (penalty > 0 && poolManager.getLiquidity(pos.poolId) > 0) {
+            if (zeroForOne) poolManager.donate(key, 0, penalty, "");
+            else poolManager.donate(key, penalty, 0, "");
         } else {
-            // Approaching 50% of liquidity: extreme impact
-            estimatedMoveInt = int256(absBps) * 500;
-            console.log("  Using 500x multiplier, estimatedMoveInt:", uint256(estimatedMoveInt));
+            penalty = 0;
         }
-        
-        // For concentrated liquidity: Scale down by 50% since liquidity will drop
-        // as we move out of tight ranges into wider ranges with less depth
-        estimatedMoveInt = estimatedMoveInt / 2;
-        console.log("  After 50% concentration adjustment:", uint256(estimatedMoveInt));
-        
-        // Cap to reasonable bounds
-        if (estimatedMoveInt > 150000) estimatedMoveInt = 150000;
-        if (estimatedMoveInt < -150000) estimatedMoveInt = -150000;
-        
-        console.log("  After capping, estimatedMoveInt:", uint256(estimatedMoveInt));
-        
-        int24 estimatedMove = int24(estimatedMoveInt);
-        int24 estimatedTick = params.zeroForOne 
-            ? currentTick - estimatedMove 
-            : currentTick + estimatedMove;
-        
-        console.log("  zeroForOne:", params.zeroForOne);
-        console.log("  Calculated estimatedTick:", currentTick);
-        console.log("  + estimatedMove:", uint256(int256(estimatedMove)));
-        console.log("  = ", uint256(int256(estimatedTick)));
-        
-        // Clamp to valid tick range
-        if (estimatedTick > TickMath.MAX_TICK) estimatedTick = TickMath.MAX_TICK;
-        if (estimatedTick < TickMath.MIN_TICK) estimatedTick = TickMath.MIN_TICK;
-        
-        // Respect price limit as a bound
-        if (params.sqrtPriceLimitX96 != 0) {
-            int24 limitTick = TickMath.getTickAtSqrtPrice(params.sqrtPriceLimitX96);
-            if (params.zeroForOne) {
-                if (estimatedTick < limitTick) estimatedTick = limitTick;
-            } else {
-                if (estimatedTick > limitTick) estimatedTick = limitTick;
-            }
-        }
-        
-        console.log("  Final estimated tick:", uint256(int256(estimatedTick)));
-        return estimatedTick;
+
+        // take net proceeds
+        (zeroForOne ? key.currency1 : key.currency0).take(poolManager, address(this), proceeds - penalty, false);
     }
 
-    function _calculateTotalDebt(
-        BorrowPosition storage pos
-    ) internal view returns (uint256) {
-        uint256 timeElapsed = block.timestamp - pos.creationTime;
-        uint256 interest = pos.debtAmount.mulDivDown(
-            pos.interestRate * timeElapsed,
-            10000 * 365 days
-        );
-        return pos.debtAmount + interest;
+    // ------------------------------------------------------------------ force close
+
+    function _executeForceClose(PoolKey memory key, bytes32 positionId, address caller) internal {
+        Position storage pos = positions[positionId];
+        uint8 reason = _forceCloseReason(positionId);
+        Config memory cfg = configs[pos.poolId];
+
+        // close out any running liquidation episode for penalty accounting
+        (, int24 tick,,) = poolManager.getSlot0(pos.poolId);
+        _refreshPosition(positionId, tick);
+
+        uint256 collateralSold = pos.collateral;
+        uint256 reward;
+        uint256 used;
+        if (collateralSold > 0) {
+            (uint256 proceeds, uint256 penalty) =
+                _swapCollateral(key, pos, collateralSold, _currentPenaltyBps(pos, cfg));
+            pos.collateral = 0;
+
+            // caller reward comes out of the penalty flow, not the borrower's hide
+            reward = FullMath.mulDiv(proceeds, cfg.rewardBps, BPS);
+            if (reward > proceeds - penalty) reward = proceeds - penalty;
+
+            PoolState storage pool = pools[pos.poolId];
+            LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+            uint256 net = proceeds - penalty - reward;
+            uint256 burned;
+            (burned, used) = vault.repay(net, pos.debtShares);
+            pos.debtShares -= uint128(burned);
+            if (net > used) vault.asset().safeTransfer(pos.borrower, net - used);
+            if (reward > 0) vault.asset().safeTransfer(caller, reward);
+        }
+
+        emit ForceClosed(positionId, caller, reason, reward);
+        _closePosition(positionId, pos.debtShares); // any remainder is bad debt
     }
 
-    function getPosition(
-        bytes32 positionId
-    ) external view returns (BorrowPosition memory) {
+    function _forceCloseReason(bytes32 positionId) internal view returns (uint8) {
+        Position storage pos = positions[positionId];
+        if (pos.borrower == address(0)) return 0;
+        (, int24 tick,,) = poolManager.getSlot0(pos.poolId);
+        if (LiqRangeMath.pastRange(pos.collateralIs0, tick, pos.tickEnd)) return 1;
+        if (block.timestamp > pos.expiry) return 2;
+
+        // health breach: at the CURRENT price, remaining collateral (after the
+        // slippage buffer) no longer covers the debt — interest erosion or a
+        // partial gap-through has made waiting strictly worse for lenders
+        PoolState storage pool = pools[pos.poolId];
+        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+        uint256 debt = vault.debtAssetsForShares(pos.debtShares);
+        uint256 collValue =
+            LiqRangeMath.convertAtSqrtPrice(pos.collateral, TickMath.getSqrtPriceAtTick(tick), pos.collateralIs0);
+        uint256 usable = FullMath.mulDiv(collValue, BPS - configs[pos.poolId].slippageBufferBps, BPS);
+        if (usable < debt) return 3;
+        return 0;
+    }
+
+    // ------------------------------------------------------------------ closing & accounting
+
+    /// @dev Close a position: return remaining collateral to the borrower, write
+    /// off `writeOffShares` of unrecoverable debt, deregister triggers.
+    function _closePosition(bytes32 positionId, uint256 writeOffShares) internal {
+        Position storage pos = positions[positionId];
+        PoolState storage pool = pools[pos.poolId];
+        PoolKey memory key = pool.key;
+
+        uint256 collateralBack = pos.collateral;
+        uint256 shortfall;
+        if (writeOffShares > 0) {
+            LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+            shortfall = vault.writeOff(writeOffShares);
+        }
+
+        triggers[pos.poolId].deregister(pos.tickStart, key.tickSpacing, positionId);
+        triggers[pos.poolId].deregister(pos.tickEnd, key.tickSpacing, positionId);
+
+        address borrower = pos.borrower;
+        bool collateralIs0 = pos.collateralIs0;
+        delete positions[positionId]; // also drops it from the queue lazily
+
+        if (collateralBack > 0) {
+            ERC20(Currency.unwrap(collateralIs0 ? key.currency0 : key.currency1)).safeTransfer(borrower, collateralBack);
+        }
+        emit PositionClosed(positionId, collateralBack, shortfall);
+    }
+
+    // ------------------------------------------------------------------ views & helpers
+
+    function _currentPenaltyBps(Position storage pos, Config memory cfg) internal view returns (uint256) {
+        uint256 timeInLiq = pos.timeInLiqAccrued;
+        if (pos.liqStartedAt != 0) timeInLiq += block.timestamp - pos.liqStartedAt;
+        return ChunkMath.penaltyBps(cfg.basePenaltyBps, pos.ltBps, timeInLiq, cfg.timeCapX);
+    }
+
+    /// @dev Token depth of current in-range liquidity spread across the position's
+    /// range, in collateral-token units. Rough but cheap and monotone.
+    function _rangeDepthTokens(PoolId poolId, Position storage pos) internal view returns (uint256) {
+        uint128 liquidity = poolManager.getLiquidity(poolId);
+        if (liquidity == 0) return 0;
+        (uint160 lo, uint160 hi) = pos.tickStart < pos.tickEnd
+            ? (TickMath.getSqrtPriceAtTick(pos.tickStart), TickMath.getSqrtPriceAtTick(pos.tickEnd))
+            : (TickMath.getSqrtPriceAtTick(pos.tickEnd), TickMath.getSqrtPriceAtTick(pos.tickStart));
+        return pos.collateralIs0
+            ? SqrtPriceMath.getAmount0Delta(lo, hi, liquidity, false)
+            : SqrtPriceMath.getAmount1Delta(lo, hi, liquidity, false);
+    }
+
+    function getPosition(bytes32 positionId) external view returns (Position memory) {
         return positions[positionId];
     }
 
-    function getActivePositions(
-        PoolKey calldata key
-    ) external view returns (bytes32[] memory) {
-        return activePositions[key.toId()];
+    function getPool(PoolId poolId)
+        external
+        view
+        returns (LendingVault vault0, LendingVault vault1, int24 processedTick, bool enabled)
+    {
+        PoolState storage p = pools[poolId];
+        return (p.vault0, p.vault1, p.processedTick, p.enabled);
+    }
+
+    function queueLength(PoolId poolId) external view returns (uint256) {
+        return liqQueue[poolId].length;
+    }
+
+    /// @notice Current debt of a position in debt-asset units.
+    function debtOf(bytes32 positionId) external view returns (uint256) {
+        Position storage pos = positions[positionId];
+        if (pos.borrower == address(0)) return 0;
+        PoolState storage pool = pools[pos.poolId];
+        LendingVault vault = pos.collateralIs0 ? pool.vault1 : pool.vault0;
+        return vault.debtAssetsForShares(pos.debtShares);
+    }
+
+    // ------------------------------------------------------------------ admin
+
+    function setConfig(PoolId poolId, Config calldata cfg) external onlyOwner {
+        configs[poolId] = cfg;
+    }
+
+    function setOwner(address newOwner) external onlyOwner {
+        owner = newOwner;
     }
 }

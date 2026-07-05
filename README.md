@@ -1,247 +1,59 @@
-# TrueLend: Oracleless AMM-Native Lending Protocol
+# TrueLend — Oracleless Lending on Uniswap v4
 
-## 🎯 Problem Statement
-Billions of dollars in DeFi lending failures stem from oracle dependence:
-- **Latency** : External price feeds lag behind market reality
-- **Manipulation Risk** : Oracle price feeds can be attacked or manipulated
-- **Asset Listing Constraints** : Only assets with reliable oracles can be listed
-- **Conservative LTs** : Protocols must maintain low liquidation thresholds (50-80%) to compensate for oracle uncertainty
-- **Binary Liquidations**: All-or-nothing liquidations cause cascading deleveraging "death spirals"
+TrueLend is a lending protocol built as a Uniswap v4 hook. It uses **no price oracle**: the pool's own tick decides everything, and liquidation is not an event but a **process** — while the price sits inside a position's liquidation range, the hook sells the collateral in small, time-paced chunks into the pool; if the price recovers, the decay pauses. A penalty per chunk is donated to the pool's LPs, who replace keepers as the compensated absorbers of liquidation flow.
 
-## 💡 TrueLend's Solution
+Because selling is rate-limited (≈1% of a position per minute, scaled by range depth and pool thinness), no liquidation can crater the price and cascade into the next one — and because the trigger is the pool's own tick, there is no oracle to lag, spoof, or de-list. That is what makes liquidation thresholds up to 99% possible on deep pools.
 
-TrueLend eliminates oracles entirely by embedding liquidation logic directly into Uniswap v4 AMM dynamics:
-### AMM-Native Liquidations
+🏆 First place, UHI hackathon (original concept & v1). This is v2: the same liquidation mechanism, made correct and complete.
 
-Instead of external oracles, TrueLend uses:
-- **Tick Movement** : Price is defined by AMM tick position
-- **Gradual Liquidation**: TWAMM-style incremental swaps replace binary liquidations
-- **Reversible Process**: If price moves back, liquidation pauses/reverses
-- **Higher LTs**: Support liquidation thresholds up to 99
+- **[DESIGN.md](DESIGN.md)** — the full specification: a loan walked end-to-end, architecture, the chunk engine, parameters, build plan.
+- **[RESEARCH.md](RESEARCH.md)** — why chunked *active* conversion is the only AMM-native way to do this (passive "inverse range orders" are provably impossible on v4), prior art (LLAMMA, Ajna, Ammalgam, …), manipulation economics, and all the math.
 
+## How it works
 
-## Architecture
-![alt text](https://github.com/queenleoa/TrueLend/blob/fd3a6489316b7bd34bb41c5fa43b1b57dfe74c0f/architecture.png)
-
-### Hook Functions
-
-#### `beforeSwap()`
-**Purpose**: Detect liquidation range crossing
-**Flow**:
-1. Get current tick and estimate new tick after swap
-2. Check if crossing into any position's liquidation range (tickLower)
-3. Mark positions for liquidation if threshold crossed
-4. Return zero delta - user's swap proceeds unaffected
-
-```solidity
-function _beforeSwap(
-    PoolKey calldata key,
-    SwapParams calldata params
-) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-    int24 currentTick = getCurrentTick(key);
-    int24 estimatedNewTick = _estimateNewTick(key, params, currentTick);
-    _checkAndActivateLiquidations(key, currentTick, estimatedNewTick);
-    return (selector, ZERO_DELTA, 0);
-}
+```
+lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueLendHook ◄──open/repay── borrowers
+                                                            │
+                                        beforeSwap: manipulation-resistant oracle obs
+                                        afterSwap:  trigger-tick walk + ≤2 liquidation
+                                                    chunks (direct swap + donate)
 ```
 
-#### `afterSwap()`
-**Purpose**: Execute TWAMM-style liquidation chunks
-**Flow**:
-1. For each position needing liquidation:
-   - Calculate chunk size based on time, depth, liquidity pressure
-   - Execute chunk via `unlock()` callback
-   - Update position accounting
-2. Check if position fully liquidated or safe
+1. **Open**: borrower deposits one pool currency as collateral, borrows the other from that side's vault. Collateral is valued at the *worse of* spot and a truncated median of the pool's own recent ticks (single-block price pumps don't raise borrow limits). The position gets a liquidation range starting at its LT price, ~√2 wide.
+2. **Decay**: when the pool tick is inside the range, each swap's `afterSwap` (or a permissionless `poke`) sells a paced chunk of collateral, donates a penalty to in-range LPs via `donate()`, and repays the vault. Price leaves the range → decay pauses; re-enters → resumes.
+3. **Backstop**: past the range end, past the term (180d), or health-breached, anyone may `forceClose` for a reward. Shortfalls hit vault reserves first, then socialize pro-rata — a declared waterfall, not an implicit one.
 
-```solidity
-function _afterSwap(
-    PoolKey calldata key
-) internal override returns (bytes4, int128) {
-    _executeLiquidationChunks(key);
-    return (selector, 0);
-}
-```
+## Contracts
 
-#### `unlockCallback()`
-**Purpose**: Execute single liquidation chunk
-**Flow**:
-1. Settle borrower's USDC collateral to PoolManager
-2. Execute swap: USDC → ETH
-3. Calculate penalty based on LT, time in liquidation, amount
-4. Donate penalty to LPs via `donate()`
-5. Apply remaining ETH to debt repayment
-6. Update position accounting
+| Contract | Role |
+|---|---|
+| [`TrueLendHook`](src/TrueLendHook.sol) | hook + lending core; one instance serves many pools — initializing any ERC20/ERC20 pool with this hook makes it a lending market |
+| [`LendingVault`](src/LendingVault.sol) | per-currency lender vault: shares, borrow index, kinked IRM (kink 80%, hard cap 90%), 10% reserve factor |
+| [`VaultFactory`](src/VaultFactory.sol) | deploys the two vaults per pool at initialization |
+| [`libraries/LiqRangeMath`](src/libraries/LiqRangeMath.sol) | decimals-safe Q96 liquidation-range placement, both borrow directions |
+| [`libraries/ChunkMath`](src/libraries/ChunkMath.sol) | the pacing formula (time × depth × pressure, clamped) |
+| [`libraries/TruncatedOracle`](src/libraries/TruncatedOracle.sol) | ±9,116-tick truncation, median-of-9, widen-only extremes, bootstrap gate |
+| [`libraries/TriggerIndex`](src/libraries/TriggerIndex.sol) | tick bitmap so `afterSwap` only touches positions whose boundaries were crossed |
 
-```solidity
-function unlockCallback(bytes calldata data) external onlyPoolManager {
-    // Settle collateral to PM
-    currency1.settle(poolManager, address(this), amount, false);
-    
-    // Execute swap
-    BalanceDelta delta = poolManager.swap(poolKey, swapParams, "");
-    
-    // Take received ETH
-    uint256 ethReceived = uint256(uint128(-delta.amount0()));
-    currency0.take(poolManager, address(this), ethReceived, false);
-    
-    // Calculate and donate penalty
-    uint256 penalty = _calculatePenalty(pos, amount, ethReceived);
-    poolManager.donate(poolKey, penalty, 0, "");
-    currency0.settle(poolManager, address(this), penalty, false);
-    
-    // Update position
-    pos.collateralRemaining -= amount;
-    pos.debtRepaid += (ethReceived - penalty);
-}
-```
-
-### Position Management
-
-#### `createPosition()`
-Creates new borrow position with:
-- Collateral transfer from router to hook
-- Liquidation tick calculation using TickMath
-- Position tracking in mapping and tick arrays
-- Borrowed token transfer to borrower
-
-```solidity
-function createPosition(
-    PoolKey calldata key,
-    address borrower,
-    uint256 collateralAmount,
-    uint256 debtAmount,
-    uint8 liquidationThreshold
-) external onlyLendingRouter returns (bytes32 positionId) {
-    // Calculate liquidation ticks
-    (int24 tickLower, int24 tickUpper) = _calculateLiquidationTicks(...);
-    
-    // Transfer collateral from router
-    IERC20(currency1).transferFrom(msg.sender, address(this), collateralAmount);
-    
-    // Create position
-    positions[positionId] = BorrowPosition({...});
-    
-    // Track position
-    activePositions[poolId].push(positionId);
-    positionsAtTick[poolId][tickLower].push(positionId);
-    
-    // Send borrowed tokens to borrower
-    IERC20(currency0).transfer(borrower, debtAmount);
-}
-```
-
-### Key Data Structures
-
-```solidity
-struct BorrowPosition {
-    address borrower;
-    uint256 collateralAmount;      // Original USDC deposited
-    uint256 collateralRemaining;   // USDC not yet liquidated
-    uint256 debtAmount;            // Original ETH borrowed
-    uint256 debtRepaid;            // ETH repaid via liquidation
-    int24 tickLower;               // Liquidation start tick
-    int24 tickUpper;               // Liquidation end tick
-    uint8 liquidationThreshold;    // LT as percentage (90 = 90%)
-    bool needsLiquidation;         // Currently in liquidation range
-    bool isActive;                 // Position is open
-}
-```
-
-### Liquidation Tick Calculation
-
-Given current price, liquidation threshold, collateral, and debt:
-
-```solidity
-function _calculateLiquidationTicks(
-    uint160 sqrtPriceX96Current,
-    uint8 liquidationThreshold,
-    uint256 collateralAmount,
-    uint256 debtAmount
-) internal pure returns (int24 tickLower, int24 tickUpper) {
-    // Liquidation price: (LT * collateral) / (debt * 100)
-    uint256 liquidationPrice = FullMath.mulDiv(
-        liquidationThreshold * collateralAmount,
-        1,
-        debtAmount * 100
-    );
-    
-    // Convert to sqrtPriceX96
-    uint160 sqrtPriceLiquidation = uint160(
-        FixedPointMathLib.sqrt(liquidationPrice) << 96
-    );
-    
-    // Get tick from sqrtPrice
-    tickLower = TickMath.getTickAtSqrtPrice(sqrtPriceLiquidation);
-    
-    // Upper tick: ~sqrt(2) * liquidation price
-    uint160 sqrtPriceUpper = uint160(
-        (uint256(sqrtPriceLiquidation) * 14142) / 10000
-    );
-    tickUpper = TickMath.getTickAtSqrtPrice(sqrtPriceUpper);
-}
-```
-
-### Chunk Size Formula
-
-```solidity
-chunkSize = baseChunk 
-          * (timeSinceLastChunk / CHUNK_INTERVAL)
-          * (1 + depthIntoRange / rangeWidth)
-          * (1 + positionSize / poolLiquidity)
-```
-
-Bounded by MIN_CHUNK_SIZE (10 USDC), MAX_CHUNK_SIZE (1000 USDC).
-
-### Penalty Calculation
-
-```solidity
-penalty = ethReceived
-        * BASE_PENALTY_RATE (5%)
-        * (LT / 100)
-        * (1 + timeInLiquidation / 1 hour)
-```
-
-## Benefits
-
-**For Borrowers**:
-- Higher LTs: Up to 99% vs 50-80% in oracle-based systems
-- Gradual liquidation: No instant wipeout
-- Reversible: Price moves back = liquidation pauses
-
-**For LPs**:
-- New revenue stream: Earn penalties from liquidations
-- No keeper needed: Embedded in swap flow
-
-**For Protocol**:
-- No oracle risk: Eliminates entire attack surface
-- Simpler: No oracle integration or maintenance
-- More assets: List any token pair with AMM liquidity
-
-## Setup
-
-### Build
+## Build & test
 
 ```bash
+git clone --recursive <repo>
 forge build
+forge test          # 76 tests: unit + fuzz (libraries, vault), integration
+                    # scenarios (full liquidation lifecycle), invariants
 ```
 
-### Test
+Test map: [`test/libraries/`](test/libraries/) (fuzzed math + oracle), [`test/LendingVault.t.sol`](test/LendingVault.t.sol) (IRM, accrual, write-off waterfall), [`test/TrueLendHook.t.sol`](test/TrueLendHook.t.sol) (open/repay/decay/pause/resume/forceClose, manipulation defense, 6-vs-18-decimals pair), [`test/TrueLendInvariants.t.sol`](test/TrueLendInvariants.t.sol) (conservation under random action sequences).
+
+## Deploy
 
 ```bash
-forge test -vv
+POOL_MANAGER=0x... forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
-### Test Scenarios
+Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` flags via CREATE2, deploys, and prints addresses. Any pool then initialized with this hook is automatically a lending market (loans open only after the pool's 9-minute oracle window fills).
 
-1. **test_NoLiquidation_PriceBelowThreshold**: Position created, small swap executed, price stays below threshold, no liquidation occurs
+## Status & roadmap
 
-2. **test_PartialLiquidation_PriceEntersRange**: Position created, large swap crosses into liquidation range, incremental liquidation begins, multiple chunks executed over time
-
-3. **test_FullLiquidation_PriceThroughRange**: Position created, multiple swaps drive price through entire range, all collateral liquidated, position closed
-
-### Deploy
-
-```bash
-forge script script/DeployTrueLend.s.sol:DeployTrueLend --rpc-url <your_rpc_url> --private-key <your_private_key> --broadcast
-```
+Working v2 with full test coverage of the mechanism. Not audited. Next: the parameter-modeling notebook (chunk pacing constants, LT tiers vs pool depth, penalty curve — DESIGN.md §7 ★ rows), per-block borrow caps and aggregate tick-region exposure caps, and testnet deployment.
