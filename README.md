@@ -40,7 +40,7 @@ lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueL
 ```bash
 git clone --recursive <repo>
 forge build
-forge test          # 76 tests: unit + fuzz (libraries, vault), integration
+forge test          # 77 tests: unit + fuzz (libraries, vault), integration
                     # scenarios (full liquidation lifecycle), invariants
 ```
 

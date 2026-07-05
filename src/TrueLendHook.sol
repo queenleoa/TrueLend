@@ -45,6 +45,7 @@ contract TrueLendHook is BaseHook {
     uint256 internal constant MAX_CHUNKS_PER_SWAP = 2;
     uint256 internal constant MAX_CHUNKS_PER_POKE = 10;
     uint256 internal constant MAX_TRIGGERS_PER_WALK = 8;
+    uint256 internal constant MAX_REFRESHES_PER_WALK = 32;
     uint16 internal constant MIN_LT_BPS = 5000;
     // open-time LTV must sit below the chosen LT by this factor (95%)
     uint256 internal constant OPEN_LTV_HEADROOM_BPS = 9500;
@@ -139,6 +140,7 @@ contract TrueLendHook is BaseHook {
     error OracleNotReady();
     error LtOutOfBounds();
     error AmountTooSmall();
+    error AmountTooLarge();
     error LtvTooHigh();
     error GapTooSmall();
     error CoverageInsufficient();
@@ -257,6 +259,7 @@ contract TrueLendHook is BaseHook {
         if (!oracles[poolId].ready()) revert OracleNotReady();
         if (ltBps < MIN_LT_BPS || ltBps > cfg.maxLtBps) revert LtOutOfBounds();
         if (collateralAmount == 0 || borrowAmount == 0 || borrowAmount < cfg.minBorrow) revert AmountTooSmall();
+        if (collateralAmount > type(uint128).max) revert AmountTooLarge();
 
         (, int24 spotTick,,) = poolManager.getSlot0(poolId);
 
@@ -289,6 +292,7 @@ contract TrueLendHook is BaseHook {
         ERC20(Currency.unwrap(collateralIs0 ? key.currency0 : key.currency1))
             .safeTransferFrom(msg.sender, address(this), collateralAmount);
         uint256 debtShares = vault.borrow(borrowAmount, msg.sender);
+        if (debtShares > type(uint128).max) revert AmountTooLarge();
 
         positionId = keccak256(abi.encodePacked(msg.sender, PoolId.unwrap(poolId), positionNonce++));
         positions[positionId] = Position({
@@ -394,15 +398,25 @@ contract TrueLendHook is BaseHook {
         (, int24 tick,,) = poolManager.getSlot0(poolId);
         int24 from = pool.processedTick;
         if (tick == from) return;
+        bool up = tick > from;
 
         (int24[] memory crossed, uint256 n, int24 walkedTo) =
             triggers[poolId].crossedTriggers(from, tick, key.tickSpacing, MAX_TRIGGERS_PER_WALK);
+        uint256 budget = MAX_REFRESHES_PER_WALK;
         for (uint256 i = 0; i < n; i++) {
             bytes32[] storage ids = triggers[poolId].idsAtTick(crossed[i]);
             uint256 m = ids.length;
+            if (m > budget) {
+                // gas bound hit mid-tick (dust-position pileup): stop before this
+                // trigger; the next swap or poke resumes here. _refreshPosition is
+                // idempotent, so partially re-processing a tick later is safe.
+                pool.processedTick = up ? crossed[i] - 1 : crossed[i] + 1;
+                return;
+            }
             for (uint256 j = 0; j < m; j++) {
                 _refreshPosition(ids[j], tick);
             }
+            budget -= m;
         }
         pool.processedTick = walkedTo;
     }
@@ -490,10 +504,12 @@ contract TrueLendHook is BaseHook {
         );
         if (chunk == 0) return false;
 
-        (uint256 proceeds, uint256 penalty) = _swapCollateral(key, pos, chunk, _currentPenaltyBps(pos, cfg));
-
+        // effects before interactions: a reentrant afterSwap during settlement
+        // must see this chunk as already taken
         pos.collateral -= uint128(chunk);
         pos.lastChunkAt = uint40(block.timestamp);
+
+        (uint256 proceeds, uint256 penalty) = _swapCollateral(key, pos, chunk, _currentPenaltyBps(pos, cfg));
 
         // repay the vault with net proceeds
         PoolState storage pool = pools[poolId];
@@ -569,9 +585,9 @@ contract TrueLendHook is BaseHook {
         uint256 reward;
         uint256 used;
         if (collateralSold > 0) {
+            pos.collateral = 0; // effects before interactions
             (uint256 proceeds, uint256 penalty) =
                 _swapCollateral(key, pos, collateralSold, _currentPenaltyBps(pos, cfg));
-            pos.collateral = 0;
 
             // caller reward comes out of the penalty flow, not the borrower's hide
             reward = FullMath.mulDiv(proceeds, cfg.rewardBps, BPS);

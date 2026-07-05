@@ -94,14 +94,41 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    B[Borrowers] -- "open / repay / close" --> H
+    B[Borrowers] -- "open / repay" --> H
+    K[Keepers / anyone] -- "poke / forceClose" --> H
     S[Swappers] -- "normal swaps" --> PM[PoolManager]
     L[Lenders] -- "deposit / redeem" --> V0["LendingVault (currency0)"]
     L -- "deposit / redeem" --> V1["LendingVault (currency1)"]
     H[TrueLendHook] -- "borrow / repay" --> V0
     H -- "borrow / repay" --> V1
-    PM -- "beforeSwap / afterSwap" --> H
-    H -- "chunk swaps · donate · claims (direct calls)" --> PM
+    F[VaultFactory] -. "deploys V0+V1 at pool init" .-> V0
+    PM -- "afterInitialize / beforeSwap / afterSwap" --> H
+    H -- "chunk swaps · donate penalty (direct calls)" --> PM
+```
+
+As-built repo layout:
+
+```mermaid
+flowchart TB
+    subgraph src
+        HOOK["TrueLendHook.sol<br/>lending core + hook callbacks +<br/>chunk engine + forceClose"]
+        VAULT["LendingVault.sol<br/>shares · borrow index · kinked IRM ·<br/>reserves · write-off waterfall"]
+        FACT["VaultFactory.sol"]
+        subgraph libraries
+            LRM["LiqRangeMath<br/>Q96 range placement, valuation"]
+            CM["ChunkMath<br/>pacing + penalty formulas"]
+            TO["TruncatedOracle<br/>truncation · median · extremes"]
+            TI["TriggerIndex<br/>tick bitmap + id lists"]
+        end
+    end
+    subgraph test
+        T1["libraries/*.t.sol — unit + fuzz"]
+        T2["LendingVault.t.sol — IRM/accrual/waterfall"]
+        T3["TrueLendHook.t.sol — 23 lifecycle scenarios"]
+        T4["TrueLendInvariants.t.sol — randomized invariants"]
+    end
+    HOOK --> VAULT & LRM & CM & TO & TI
+    HOOK --> FACT
 ```
 
 **`TrueLendHook`** — the hook and the lending core in one contract; one deployment serves many pools with per-pool config. Hook permissions and what each callback does:
@@ -181,24 +208,24 @@ Defaults; ★ = to be set/validated by the Phase 6 modeling notebook (the govern
 | IRM | 0% base, 4% slope to 80% kink, 100% after, cap 90% U | §5 |
 | Reserve factor | 10% of interest | waterfall step 1 |
 | forceClose reward | 0.1% of proceeds (from penalty) | pays the permissionless closer |
-| Dust minimum | ~$1k equivalent | dust positions rot uncloseable |
+| Dust minimum (`minBorrow`) | 0 by default — **pool owner must set** a real floor per pool (token-decimal dependent) | dust positions rot uncloseable and enable trigger-tick pileups |
 | MAX_CHUNKS_PER_SWAP / PER_POKE | 2 / 10 | hard per-swap gas bound |
+| OPEN_LTV_HEADROOM | 95% of chosen LT (constant) | at LT 99 → borrow up to ~94% LTV; the 5% margin absorbs interest accrual + oracle margin |
+| MAX_REFRESHES_PER_WALK | 32 positions per swap | bounds trigger-walk gas even if many positions share a tick; walk resumes next swap/poke |
 
 ---
 
-## 8. Build plan
+## 8. Build status
 
-| Phase | Deliverable | Done when |
-|---|---|---|
-| 0 | Repo hygiene: re-pin `lib/v4-periphery` (currently a broken submodule), adopt tagged periphery or OZ `uniswap-hooks`, strip debug code, CI green | `forge test` runs clean from fresh clone |
-| 1 | `LiqRangeMath`, `ChunkMath`, `TruncatedOracle` | fuzz vs reference math; 6/8/18-decimal pairs; both directions |
-| 2 | `LendingVault` | 4626 conformance + IRM + caps + index unit tests |
-| 3 | Hook skeleton: `open`/`repay`/`close` on a live local pool | integration happy-path |
-| 4 | Liquidation engine: trigger bitmap, queue, direct-swap chunks, `poke`, penalty donation | scenario tests: enter/decay/pause/resume/full-decay, multi-position, quiet market |
-| 5 | Backstops: `forceClose` (all 3 triggers), waterfall, rewards | invariant + fuzz suite (below) |
-| 6 | Deploy script (HookMiner), demo, README, **parameter notebook** | modeled defaults for ★ rows |
+Phases 0–6 of the original plan are **implemented and green**: 77 tests (library fuzz + vault unit + 23 hook lifecycle scenarios + 5 randomized invariants), gas snapshot in `.gas-snapshot`, deploy script at `script/Deploy.s.sol` (HookMiner + CREATE2), CI profile configured.
 
-**Invariants (Phase 5 suite):** (a) vault assets + hook claims + Σ collateral valued at range-end ≥ Σ liabilities − declared waterfall capacity; (b) chunk execution never violates pacing bounds; (c) exit-range always pauses decay; (d) no flow strands funds in the hook; (e) per-swap hook gas is bounded regardless of position count.
+**Invariants held under randomized action sequences:** (a) the hook holds exactly the sum of open positions' collateral — nothing strands or leaks; (b) position debt shares reconcile with vault totals; (c) vault balances always cover tracked reserves; (d) utilization never exceeds the hard cap; (e) lenders fall below principal only through the declared write-off waterfall (`totalUncoveredShortfall` on each vault is the on-chain record).
+
+**Security assumptions & posture (v1):**
+- **Standard ERC20s only**: no fee-on-transfer, rebasing, or transfer-hook tokens; no native-ETH pools (rejected at initialization). Chunk paths follow checks-effects-interactions and all user entrypoints are reentrancy-guarded regardless.
+- **Bounded per-swap work**: ≤8 trigger ticks and ≤32 position refreshes per walk, ≤2 chunks per swap — lending state can never gas-bomb a swap; deferred work is picked up by the next swap or a permissionless `poke`.
+- **Owner powers**: `setConfig` per pool and `setOwner` only. A production deployment should put the owner behind a timelock (or renounce after setting per-pool `minBorrow`).
+- **Not yet audited.** Deliberately deferred to keep v1 simple: the parameter-modeling notebook for the ★ rows, per-block borrow caps, aggregate tick-region exposure caps, LT-scaled rate premiums, configurable open-LTV headroom.
 
 ---
 

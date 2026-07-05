@@ -170,6 +170,46 @@ contract TrueLendHookTest is Test, Deployers {
         assertApproxEqAbs(vault1.utilizationBps(), 2, 1); // 50 borrowed of 200k deposited
     }
 
+    /// The headline feature: LT 99% works. The borrower takes ~94% LTV, gets
+    /// liquidation-triggered by a ~2% adverse move, decays gradually instead of
+    /// being wiped, and recovers fully when price comes back.
+    function test_open_lt99_maxLeverage() public {
+        // 100 collateral, 93.5 debt: LTV 93.5% <= 95% of LT 99%
+        vm.prank(alice);
+        bytes32 id = hook.open(poolKey, true, 100e18, 93.5e18, 9900);
+
+        TrueLendHook.Position memory pos = hook.getPosition(id);
+        // liquidation starts ~5.6% below spot (943 -> tick ~ -540 after alignment)
+        assertGt(pos.tickStart, -700);
+        assertLt(pos.tickStart, -300);
+
+        // ...but one notch above the headroom cap is rejected
+        vm.prank(alice);
+        vm.expectRevert(TrueLendHook.LtvTooHigh.selector);
+        hook.open(poolKey, true, 100e18, 95e18, 9900);
+
+        // a ~7% adverse move starts the (gradual!) liquidation
+        _swap(true, 4_000e18);
+        pos = hook.getPosition(id);
+        assertGt(pos.liqStartedAt, 0, "liquidation started fast at LT99");
+        assertGt(pos.collateral, 95e18, "but only a paced chunk sold, no wipeout");
+        assertLt(hook.debtOf(id), 93.5e18, "chunk already deleveraged the debt");
+
+        // price recovers: the position survives with almost all collateral
+        skip(61);
+        _swap(false, 4_500e18);
+        pos = hook.getPosition(id);
+        assertEq(pos.liqStartedAt, 0, "paused on recovery");
+        assertGt(pos.collateral, 90e18);
+
+        // borrower can walk away whole by repaying
+        uint256 debt = hook.debtOf(id);
+        vm.prank(alice);
+        hook.repay(id, debt + 1e18);
+        assertEq(hook.getPosition(id).borrower, address(0), "closed");
+        assertGt(token0.balanceOf(alice), 100_000e18 - 10e18, "collateral (minus decay) back");
+    }
+
     function test_open_bothDirections() public {
         vm.prank(alice);
         bytes32 id = hook.open(poolKey, false, 100e18, 50e18, 9000);

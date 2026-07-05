@@ -9,6 +9,8 @@ This report is the background for [DESIGN.md](DESIGN.md). It answers four questi
 
 Section 5 documents an alternative architecture that was evaluated and rejected during this redesign, so the reasoning isn't lost.
 
+> **Implementation status**: the design specified here is built and tested — see [DESIGN.md §8](DESIGN.md) for the as-built status, invariants, and security posture. One check evolved during the build: the open-time constraint is initial LTV ≤ 95% of the chosen LT at the worse-of price (a *guaranteed* full-traversal coverage requirement is mathematically incompatible with LT > ~70%, per §6.5 — that tail is instead carried by the health backstop and the declared waterfall, which is the product working as intended).
+
 ---
 
 ## 1. The central question: can the AMM liquidate passively?
