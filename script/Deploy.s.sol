@@ -19,20 +19,23 @@ contract Deploy is Script {
     function run() external {
         IPoolManager poolManager = IPoolManager(vm.envAddress("POOL_MANAGER"));
 
+        address owner = vm.envAddress("WALLET_ADDRESS");
+
         vm.startBroadcast();
         VaultFactory factory = new VaultFactory();
 
         uint160 flags = uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG);
-        bytes memory constructorArgs = abi.encode(poolManager, factory);
+        bytes memory constructorArgs = abi.encode(poolManager, factory, owner);
         (address hookAddress, bytes32 salt) =
             HookMiner.find(CREATE2_FACTORY_ADDRESS, flags, type(TrueLendHook).creationCode, constructorArgs);
 
-        TrueLendHook hook = new TrueLendHook{salt: salt}(poolManager, factory);
+        TrueLendHook hook = new TrueLendHook{salt: salt}(poolManager, factory, owner);
         require(address(hook) == hookAddress, "hook address mismatch");
         vm.stopBroadcast();
 
         console.log("VaultFactory:", address(factory));
         console.log("TrueLendHook:", address(hook));
+        console.log("owner:", hook.owner());
         console.log("(initialize any pool with this hook to enable lending on it)");
     }
 }

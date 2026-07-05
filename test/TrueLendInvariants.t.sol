@@ -149,9 +149,9 @@ contract TrueLendInvariantsTest is Test, Deployers {
             address(this),
             uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG),
             type(TrueLendHook).creationCode,
-            abi.encode(address(manager), address(factory))
+            abi.encode(address(manager), address(factory), address(this))
         );
-        hook = new TrueLendHook{salt: hookSalt}(manager, factory);
+        hook = new TrueLendHook{salt: hookSalt}(manager, factory, address(this));
         require(address(hook) == hookAddress, "hook address mismatch");
 
         poolKey = PoolKey({

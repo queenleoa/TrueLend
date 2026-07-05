@@ -54,6 +54,14 @@ POOL_MANAGER=0x... forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadca
 
 Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` flags via CREATE2, deploys, and prints addresses. Any pool then initialized with this hook is automatically a lending market (loans open only after the pool's 9-minute oracle window fills).
 
+## Deployments
+
+| Network | Contract | Address |
+|---|---|---|
+| Unichain Sepolia (1301) | TrueLendHook | [`0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0`](https://sepolia.uniscan.xyz/address/0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0) |
+| Unichain Sepolia (1301) | VaultFactory | `0x29076c8Bf089Ab07A146d3fc528A1CF3F4b2CB2b` |
+| Unichain Sepolia (1301) | PoolManager (canonical) | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
+
 ## Status & roadmap
 
 Working v2 with full test coverage of the mechanism. Not audited. Next: the parameter-modeling notebook (chunk pacing constants, LT tiers vs pool depth, penalty curve — DESIGN.md §7 ★ rows), per-block borrow caps and aggregate tick-region exposure caps, and testnet deployment.

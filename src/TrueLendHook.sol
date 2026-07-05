@@ -163,8 +163,10 @@ contract TrueLendHook is BaseHook {
         _;
     }
 
-    constructor(IPoolManager _poolManager, VaultFactory _factory) BaseHook(_poolManager) {
-        owner = msg.sender;
+    constructor(IPoolManager _poolManager, VaultFactory _factory, address _owner) BaseHook(_poolManager) {
+        // explicit owner: deploying through a CREATE2 proxy makes msg.sender the
+        // proxy, which would brick setConfig/setOwner
+        owner = _owner;
         vaultFactory = _factory;
     }
 
