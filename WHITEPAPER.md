@@ -258,7 +258,7 @@ where $s$ is chunk execution slippage and fees, $\pi$ the penalty share, $i(T)$ 
 | Vault share inflation | virtual-offset share pricing; vault-favoring rounding throughout |
 | Governance | owner powers limited to per-pool config; recommended behind a timelock |
 
-**Scope assumptions (v1):** standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens; no native-ETH pools (rejected at initialization); Cancun-capable chains (transient storage).
+**Scope assumptions (v1):** standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. Native-ETH pools are declined at initialization *by choice, not necessity*: v4 supports native ETH as `currency0`, but the lending flows are built on ERC-20 pull semantics (vault deposits, `transferFrom` on open and repay), and supporting native would add payable entry points and ETH-send reentrancy surface for no market coverage — WETH pairs serve the same asset. Native support is a deliberate deferral. Cancun-capable chains (transient storage).
 
 **Tested invariants** (randomized action sequences over open/repay/swap/poke/forceClose): the hook holds exactly the sum of open positions' collateral; position debt shares reconcile with vault totals; vault balances cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.
 

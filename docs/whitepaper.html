@@ -701,7 +701,7 @@
   <tr><td>Governance</td><td>owner powers limited to per-pool config; recommended behind a timelock</td></tr>
 </table></div>
 
-<p><strong>Scope assumptions (v1).</strong> Standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens; no native-ETH pools (rejected at initialization); chains with transient storage (Cancun+).</p>
+<p><strong>Scope assumptions (v1).</strong> Standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. Native-ETH pools are declined at initialization <em>by choice, not necessity</em>: v4 supports native ETH as <code>currency0</code>, but the lending flows are built on ERC-20 pull semantics (vault deposits, <code>transferFrom</code> on open and repay), and supporting native would add payable entry points and ETH-send reentrancy surface for no market coverage — WETH pairs serve the same asset. Native support is a deliberate deferral. Chains with transient storage (Cancun+).</p>
 
 <p><strong>Tested invariants</strong> (randomized sequences of open / repay / swap / poke / forceClose): the hook holds exactly the sum of open positions' collateral; position debt shares reconcile with vault totals; vault balances cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.</p>
 

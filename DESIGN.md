@@ -282,7 +282,7 @@ Implemented, green, and deployed: 78 tests (fuzzed library units, vault accounti
 
 **Invariants held under randomized action sequences:** the hook holds exactly the sum of open positions' collateral (nothing strands, nothing leaks); position debt shares reconcile with vault totals; vault balances always cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.
 
-**Security posture (v1 scope):** standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens, and no native-ETH pools (rejected at initialization); checks-effects-interactions ordering plus reentrancy guards on all entry points; strictly bounded per-swap work; owner powers limited to per-pool config (timelock it for production). Not audited. Deliberately deferred to keep v1 simple: per-block borrow caps, aggregate per-tick-region exposure caps, LT-scaled interest premiums, configurable opening headroom.
+**Security posture (v1 scope):** standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. Native-ETH pools are declined at initialization by choice (v4 supports native as `currency0`; the vault flows need ERC-20 pull semantics, and WETH pairs serve the same market — native support is a deliberate deferral); checks-effects-interactions ordering plus reentrancy guards on all entry points; strictly bounded per-swap work; owner powers limited to per-pool config (timelock it for production). Not audited. Deliberately deferred to keep v1 simple: per-block borrow caps, aggregate per-tick-region exposure caps, LT-scaled interest premiums, configurable opening headroom.
 
 ---
 
