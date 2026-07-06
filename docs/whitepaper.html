@@ -379,7 +379,7 @@
 
 <h3>4.1 &nbsp;Positions and liquidation ranges</h3>
 
-<p>A <strong>position</strong> deposits collateral in one pool currency and borrows the other from that side's lender vault. The borrower selects a <strong>liquidation threshold</strong> LT ∈ [50%, 99%]. The liquidation start price is where debt equals LT × collateral value — for collateral <var>C</var> in token0 and debt <var>D</var> in token1:</p>
+<p>A position is opened by depositing collateral in one pool currency and borrowing the other from that side's lender vault. The borrower selects a <strong>liquidation threshold</strong> LT ∈ [50%, 99%]. The liquidation start price is where debt equals LT × collateral value — for collateral <var>C</var> in token0 and debt <var>D</var> in token1:</p>
 
 <div class="formula">
   <var>D</var> = LT · <var>C</var> · <var>P<sub>liq</sub></var>
@@ -421,9 +421,9 @@
     <text x="430" y="104" text-anchor="middle" font-size="10" fill="var(--muted)">LTV 72% · LT 90%</text>
 
     <!-- labels below -->
-    <text x="220" y="182" text-anchor="middle" font-size="10.5" fill="var(--risk)">CHUNKED DECAY while tick is inside</text>
-    <text x="75"  y="182" text-anchor="middle" font-size="10.5" fill="var(--risk)">forceClose zone</text>
-    <text x="485" y="182" text-anchor="middle" font-size="10.5" fill="var(--safe)">no per-swap work at all</text>
+    <text x="240" y="182" text-anchor="middle" font-size="10.5" fill="var(--risk)">chunked decay while inside</text>
+    <text x="70"  y="182" text-anchor="middle" font-size="10.5" fill="var(--risk)">forceClose</text>
+    <text x="495" y="182" text-anchor="middle" font-size="10.5" fill="var(--safe)">no per-swap work</text>
 
     <!-- decay arrows inside the band -->
     <line x1="300" y1="140" x2="264" y2="140" stroke="var(--risk)" stroke-width="1.4" marker-end="url(#arrR2)"/>
@@ -476,13 +476,13 @@
     <!-- debt line: mirrors downward more slowly -->
     <polyline fill="none" stroke="var(--safe)" stroke-width="1.8" stroke-dasharray="5 4"
       points="56,150 130,150 300,168 420,168 570,186 650,186"/>
-    <text x="612" y="170" font-size="10" fill="var(--accent)">collateral</text>
-    <text x="612" y="197" font-size="10" fill="var(--safe)">debt</text>
+    <text x="648" y="164" text-anchor="end" font-size="10" fill="var(--accent)">collateral</text>
+    <text x="648" y="199" text-anchor="end" font-size="10" fill="var(--safe)">debt</text>
 
     <!-- annotations -->
-    <text x="215" y="238" text-anchor="middle" font-size="10.5" fill="var(--muted)">~1%/min steps, depth-scaled</text>
-    <text x="360" y="238" text-anchor="middle" font-size="10.5" fill="var(--muted)">pause — nothing confiscated</text>
-    <text x="495" y="238" text-anchor="middle" font-size="10.5" fill="var(--muted)">resume; penalties scale with time-in-range</text>
+    <text x="215" y="238" text-anchor="middle" font-size="10.5" fill="var(--muted)">decay ~1%/min</text>
+    <text x="360" y="238" text-anchor="middle" font-size="10.5" fill="var(--muted)">pause</text>
+    <text x="495" y="238" text-anchor="middle" font-size="10.5" fill="var(--muted)">resume</text>
   </svg>
   </div>
   <figcaption><b>Figure 3.</b> The decay timeline. Chunks step the collateral down only while the tick sits in the range (shaded); each chunk also steps the <em>debt</em> down — decay is deleveraging, not loss. A recovery pauses the process with everything remaining intact.</figcaption>
@@ -572,7 +572,6 @@
     <text x="362" y="126" text-anchor="middle" font-size="11" fill="var(--muted)">positions · chunk engine</text>
     <text x="362" y="144" text-anchor="middle" font-size="11" fill="var(--muted)">internal oracle · backstops</text>
     <text x="362" y="162" text-anchor="middle" font-size="11" fill="var(--muted)">trigger bitmap · queue</text>
-    <text x="362" y="188" text-anchor="middle" font-size="10.5" fill="var(--muted)">afterInitialize · beforeSwap · afterSwap</text>
 
     <rect x="540" y="96"  width="200" height="42" rx="3" fill="none" stroke="var(--safe)" stroke-width="1.6"/>
     <text x="640" y="122" text-anchor="middle" font-size="12" fill="var(--safe)">Vault · currency0</text>
@@ -592,13 +591,14 @@
       <line x1="362" y1="202" x2="362" y2="228" marker-end="url(#arrA)"/>
     </g>
     <g font-size="10.5" fill="var(--muted)">
-      <text x="182" y="36" text-anchor="middle">open · repay</text>
-      <text x="208" y="112" text-anchor="middle">poke · forceClose</text>
-      <text x="182" y="270" text-anchor="middle">swaps</text>
+      <text x="208" y="60" text-anchor="middle">open · repay</text>
+      <text x="208" y="118" text-anchor="middle">poke ·</text>
+      <text x="208" y="131" text-anchor="middle">forceClose</text>
+      <text x="200" y="214" text-anchor="middle">swaps</text>
       <text x="506" y="109" text-anchor="middle">borrow</text>
       <text x="506" y="165" text-anchor="middle">repay</text>
       <text x="700" y="86" text-anchor="middle">deposit</text>
-      <text x="372" y="218" text-anchor="start">chunk swaps · donate</text>
+      <text x="372" y="222" text-anchor="start">chunk swaps · donate</text>
     </g>
   </svg>
   </div>
@@ -617,6 +617,8 @@
   <li><strong>Widen-only extremes.</strong> The raw min/max tick seen within recent intervals also bounds the borrow-side price — a spike-and-revert <em>inside</em> one interval still counts against the next borrower.</li>
   <li><strong>Bootstrap gate.</strong> No originations until the observation ring is fully populated (~9 minutes after pool creation); attacker-seeded pools cannot fabricate their own history.</li>
 </ul>
+
+<p>Three further gates apply at opening: a minimum distance between the filtered price and the range start, a minimum position size, and the 95%-of-LT headroom on opening LTV.</p>
 
 <p>An attacker who pumps spot changes nothing about their borrowing power. An attacker who shoves the price into a victim's range merely starts a rate-limited, pausable, penalty-paying decay and hands two-way fees to LPs — an attack with negative expected value.</p>
 
@@ -644,23 +646,23 @@
     <g font-size="10.5">
       <rect x="40"  y="16"  width="600" height="40" rx="3" fill="var(--safeband)" stroke="var(--safe)"/>
       <text x="58" y="33" font-weight="700" fill="var(--ink)">1 · ORIGINATION GATES</text>
-      <text x="58" y="47" fill="var(--muted)">worse-of pricing · LTV ≤ 95% of LT · min gap · bootstrap · utilization cap</text>
+      <text x="58" y="47" font-size="10" fill="var(--muted)">worse-of pricing · LTV ≤ 95% of LT · min gap · bootstrap · utilization cap</text>
 
       <rect x="70"  y="72"  width="540" height="40" rx="3" fill="var(--safeband)" stroke="var(--safe)"/>
       <text x="88" y="89" font-weight="700" fill="var(--ink)">2 · IN-RANGE DELEVERAGING</text>
-      <text x="88" y="103" fill="var(--muted)">every chunk reduces debt — decay makes positions healthier</text>
+      <text x="88" y="103" font-size="10" fill="var(--muted)">every chunk reduces debt — decay makes positions healthier</text>
 
       <rect x="100" y="128" width="480" height="40" rx="3" fill="var(--band)" stroke="var(--risk)"/>
       <text x="118" y="145" font-weight="700" fill="var(--ink)">3 · HEALTH BACKSTOP</text>
-      <text x="118" y="159" fill="var(--muted)">collateral at current price stops covering debt → anyone closes, slippage-bounded</text>
+      <text x="118" y="159" font-size="10" fill="var(--muted)">collateral no longer covers debt at current price → permissionless close</text>
 
       <rect x="130" y="184" width="420" height="40" rx="3" fill="var(--band)" stroke="var(--risk)"/>
       <text x="148" y="201" font-weight="700" fill="var(--ink)">4 · RANGE EXHAUSTION / EXPIRY</text>
-      <text x="148" y="215" fill="var(--muted)">price outran the pacing, or the term ended → close now</text>
+      <text x="148" y="215" font-size="10" fill="var(--muted)">price outran the pacing, or the term ended → close now</text>
 
       <rect x="160" y="240" width="360" height="40" rx="3" fill="var(--band-strong)" stroke="var(--risk)" stroke-width="1.6"/>
       <text x="178" y="257" font-weight="700" fill="var(--ink)">5 · DECLARED WATERFALL</text>
-      <text x="178" y="271" fill="var(--muted)">reserves → pro-rata lender haircut · recorded on-chain</text>
+      <text x="178" y="271" font-size="10" fill="var(--muted)">reserves, then pro-rata lender haircut — on-chain record</text>
     </g>
     <g stroke="var(--muted)" stroke-width="1.1">
       <line x1="340" y1="56"  x2="340" y2="72"  marker-end="url(#arrL)"/>
@@ -718,7 +720,11 @@
 
 <p><strong>Curve LLAMMA</strong> is the closest relative and the only battle-tested gradual liquidation: collateral in ~1% price bands converts to crvUSD and back as price moves — but the conversion is <em>forced by an external EMA oracle</em>, around which LLAMMA deliberately quotes losing prices so arbitrageurs do the work (≈1–2% borrower cost per episode; bad debt from gap-through has still occurred). TrueLend is LLAMMA's user experience with the oracle deleted, at the price of active execution.</p>
 
-<p><strong>Instadapp's inverse range orders</strong> proposed the passive oracle-free version; the required negative-liquidity primitive does not exist in v4 and the design was never built — TrueLend's chunk engine is its only sound realization. <strong>LIKWID</strong> and <strong>Ammalgam</strong> achieve oracle-freedom by rebuilding the AMM itself (virtual/mirror reserves) rather than living on canonical pools; Ammalgam contributes the price-<em>range</em> solvency toolkit (worse-of bounds, widen-only extremes, bootstrap gating) that TrueLend adopts at origination. <strong>GammaSwap</strong> denominates debt and collateral in swap-invariant units, eliminating price from solvency where positions are naturally balanced — inapplicable to token-vs-token debt, but its spirit survives in TrueLend's price-free liquidation trigger. <strong>Ajna</strong> replaces the oracle with lender-expressed prices and bonded auctions, at the cost of active lender management; <strong>Timeswap</strong> converts liquidation risk into option risk via fixed terms (TrueLend borrows the bounded-term idea); <strong>InfinityPools</strong> eliminates liquidation by collateralizing the worst case of borrowed LP ranges; <strong>Panoptic</strong> contributes the internal-median solvency check that inspired the oracle here.</p>
+<p><strong>Instadapp's inverse range orders</strong> proposed the passive oracle-free version; the required negative-liquidity primitive does not exist in v4 and the design was never built — TrueLend's chunk engine is its only sound realization.</p>
+
+<p><strong>LIKWID</strong> and <strong>Ammalgam</strong> achieve oracle-freedom by rebuilding the AMM itself (virtual/mirror reserves) rather than living on canonical pools; Ammalgam contributes the price-<em>range</em> solvency toolkit (worse-of bounds, widen-only extremes, bootstrap gating) that TrueLend adopts at origination. <strong>GammaSwap</strong> denominates debt and collateral in swap-invariant units, eliminating price from solvency where positions are naturally balanced — inapplicable to token-vs-token debt, but its spirit survives in TrueLend's price-free liquidation trigger.</p>
+
+<p><strong>Ajna</strong> replaces the oracle with lender-expressed prices and bonded auctions, at the cost of active lender management; <strong>Timeswap</strong> converts liquidation risk into option risk via fixed terms (TrueLend borrows the bounded-term idea); <strong>InfinityPools</strong> eliminates liquidation by collateralizing the worst case of borrowed LP ranges; <strong>Panoptic</strong> contributes the internal-median solvency check that inspired the oracle here.</p>
 
 <h2><span class="no">9</span>Extensions</h2>
 

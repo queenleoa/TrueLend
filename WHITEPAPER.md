@@ -104,7 +104,7 @@ TrueLend's cell — gradual, reversible, oracle-free, on unmodified Uniswap pool
 
 ### 4.1 Positions and liquidation ranges
 
-A **position** deposits collateral in one pool currency and borrows the other from that side's lender vault. The borrower selects a **liquidation threshold** $\mathrm{LT} \in [50\%, 99\%]$. The **liquidation start price** is where debt equals $\mathrm{LT}$ times collateral value. For collateral $C$ in token0 and debt $D$ in token1:
+A position is opened by depositing collateral in one pool currency and borrowing the other from that side's lender vault. The borrower selects a **liquidation threshold** $\mathrm{LT} \in [50\%, 99\%]$. The **liquidation start price** is where debt equals $\mathrm{LT}$ times collateral value. For collateral $C$ in token0 and debt $D$ in token1:
 
 $$
 D = \mathrm{LT}\cdot C \cdot P_{liq} \;\;\Longrightarrow\;\; P_{liq} = \frac{D}{\mathrm{LT}\cdot C},
@@ -200,7 +200,8 @@ The hook maintains its own filtered price and values collateral at the **worse o
 - **Median-of-9**: a minority of corrupted observations is ignored entirely.
 - **Widen-only extremes**: the raw min/max tick seen within recent intervals also bounds the borrow-side price — a spike-and-revert *inside* one interval still counts against the next borrower.
 - **Bootstrap gate**: no originations until the ring is fully populated (~9 minutes after pool creation); attacker-seeded pools cannot fabricate their own history.
-- Plus: minimum gap between the filtered price and the range start; minimum position size; origination discipline via the LTV headroom.
+
+Three further gates apply at opening: a minimum distance between the filtered price and the range start, a minimum position size, and the 95%-of-LT headroom on opening LTV.
 
 An attacker who pumps spot changes nothing about their borrowing power; an attacker who shoves the price into a victim's range merely starts a rate-limited, pausable, penalty-paying decay and hands two-way fees to LPs — an attack with negative expected value.
 
@@ -277,7 +278,11 @@ where $s$ is chunk execution slippage and fees, $\pi$ the penalty share, $i(T)$ 
 
 ## 8. Related work
 
-**Curve LLAMMA** is the closest relative and the only battle-tested gradual liquidation: collateral in ~1% price bands converts to crvUSD and back as price moves — but the conversion is *forced by an external EMA oracle*, around which LLAMMA deliberately quotes losing prices so arbitrageurs do the work (≈1–2% borrower cost per episode; bad debt from gap-through has still occurred). TrueLend is LLAMMA's user experience with the oracle deleted, at the price of active execution. **Instadapp's inverse range orders** proposed the passive oracle-free version; the required negative-liquidity primitive does not exist in v4 and the design was never built — TrueLend's chunk engine is its only sound realization. **LIKWID** and **Ammalgam** achieve oracle-freedom by rebuilding the AMM itself (virtual/mirror reserves) rather than living on canonical pools; Ammalgam contributes the price-*range* solvency toolkit (worse-of bounds, widen-only extremes, bootstrap gating) that TrueLend adopts at origination. **GammaSwap** denominates debt and collateral in swap-invariant units, eliminating price from solvency where positions are naturally 50:50 — inapplicable to token-vs-token debt, but its spirit survives in TrueLend's price-free liquidation trigger. **Ajna** replaces the oracle with lender-expressed prices and bonded liquidation auctions, at the cost of active lender management; **Timeswap** converts liquidation risk into option risk via fixed terms (TrueLend borrows the bounded-term idea); **InfinityPools** eliminates liquidation by collateralizing the worst case of borrowed LP ranges (its closed-form range math prices TrueLend's backstop); **Panoptic** contributes the internal-median solvency check that inspired the oracle here.
+**Curve LLAMMA** is the closest relative and the only battle-tested gradual liquidation: collateral in ~1% price bands converts to crvUSD and back as price moves — but the conversion is *forced by an external EMA oracle*, around which LLAMMA deliberately quotes losing prices so arbitrageurs do the work (≈1–2% borrower cost per episode; bad debt from gap-through has still occurred). TrueLend is LLAMMA's user experience with the oracle deleted, at the price of active execution. **Instadapp's inverse range orders** proposed the passive oracle-free version; the required negative-liquidity primitive does not exist in v4 and the design was never built — TrueLend's chunk engine is its only sound realization.
+
+**LIKWID** and **Ammalgam** achieve oracle-freedom by rebuilding the AMM itself (virtual/mirror reserves) rather than living on canonical pools; Ammalgam contributes the price-*range* solvency toolkit (worse-of bounds, widen-only extremes, bootstrap gating) that TrueLend adopts at origination. **GammaSwap** denominates debt and collateral in swap-invariant units, eliminating price from solvency where positions are naturally 50:50 — inapplicable to token-vs-token debt, but its spirit survives in TrueLend's price-free liquidation trigger.
+
+**Ajna** replaces the oracle with lender-expressed prices and bonded liquidation auctions, at the cost of active lender management; **Timeswap** converts liquidation risk into option risk via fixed terms (TrueLend borrows the bounded-term idea); **InfinityPools** eliminates liquidation by collateralizing the worst case of borrowed LP ranges (its closed-form range math prices TrueLend's backstop); **Panoptic** contributes the internal-median solvency check that inspired the oracle here.
 
 ---
 
