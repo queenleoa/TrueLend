@@ -233,7 +233,7 @@
   <p class="kicker">Whitepaper · Version 2.0 · July 2026</p>
   <h1>TrueLend: Oracleless Lending with AMM-Native Gradual Liquidation</h1>
   <p class="byline">A Uniswap v4 hook protocol</p>
-  <p class="deploy-line">Deployed · Unichain Sepolia (1301) · Hook <b>0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0</b></p>
+  <p class="deploy-line">Deployed · Unichain Sepolia (1301) · Hook <b>0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0</b></p>
 
   <!-- identity motif: a price axis with a liquidation band -->
   <svg class="band-motif" viewBox="0 0 720 46" role="img" aria-label="Price axis with a shaded liquidation band">
@@ -446,10 +446,10 @@
   &nbsp;×&nbsp; min( <span class="frac"><span>Δ<var>t</var></span><span>τ</span></span> , 5 )
   &nbsp;×&nbsp; (1 + <var>d</var>)
   &nbsp;×&nbsp; (1 + <var>ρ</var>)
-  <span class="fnote">base: 1% of remaining (N = 100) · missed-interval catch-up, capped · d = depth into range ∈ [0,1] · ρ = position∕book-depth ∈ [0,1]<br/>clamped to at most 1% of the token depth of in-range liquidity measured across the position's own range</span>
+  <span class="fnote">base: 1% of remaining (N = 100) · missed-interval catch-up, capped · d = depth into range ∈ [0,1] · ρ = position∕book-depth ∈ [0,1]<br/>clamped to at most 1% of the token depth of in-range liquidity measured across the position's own range, re-measured in the same transaction that sells</span>
 </div>
 
-<p>No single chunk can meaningfully move the price, and thinner books produce proportionally smaller slices. With defaults, full decay takes ≈100 minutes typically and ≥25 minutes even with every multiplier at its cap. This bound is the anti-cascade property in closed form: a crash that puts many positions in range produces many independent trickles — never an avalanche — because <em>each</em> position's sell flow is capped per interval.</p>
+<p>No single chunk can meaningfully move the price. “Thinner books produce smaller chunks” means proportional <em>to the pool's depth, not to the position</em>: a thin venue gets smaller absolute slices, while the pressure term quickens the cadence — decay proceeds as more, smaller steps. There is likewise no stranded remainder: decay normally ends when the <em>debt</em> reaches zero (the final chunk's excess proceeds route to the borrower, remaining collateral goes home); every chunk is clamped to what remains; and for true dust the base becomes the whole remainder, finishing the position in one chunk. With defaults, full decay takes ≈100 minutes typically and ≥25 minutes even with every multiplier at its cap. This bound is the anti-cascade property in closed form: a crash that puts many positions in range produces many independent trickles — never an avalanche — because <em>each</em> position's sell flow is capped per interval.</p>
 
 <figure>
   <div class="figframe">
@@ -530,7 +530,7 @@
     </g>
   </svg>
   </div>
-  <figcaption><b>Figure 4.</b> One chunk, executed inside a third-party swap. Detection is O(boundaries crossed): positions register their two range-boundary ticks in a per-pool bitmap and <code>afterSwap</code> walks only set bits between the previous and current tick, capped at 8 ticks and 32 position updates per swap. A permissionless <code>poke()</code> executes pending chunks in quiet markets; there is no privileged operator anywhere in the system.</figcaption>
+  <figcaption><b>Figure 4.</b> One chunk, executed inside a third-party swap. Detection is O(boundaries crossed): positions register their two range-boundary ticks in a per-pool bitmap and <code>afterSwap</code> walks only set bits between the previous and current tick, capped at 8 ticks and 32 position updates per swap. A permissionless <code>poke()</code> executes pending chunks in quiet markets and pays its caller from the penalty flow — a standing keeper incentive without privilege. (A <em>swapper</em> rebate is not implementable at the hook layer: the hook sees the router's address, not the trader's.)</figcaption>
 </figure>
 
 <p><strong>Penalty.</strong> Each chunk donates a fee to the pool's in-range LPs — they replace keepers as the compensated absorbers of liquidation flow:</p>
@@ -701,7 +701,7 @@
   <tr><td>Governance</td><td>owner powers limited to per-pool config; recommended behind a timelock</td></tr>
 </table></div>
 
-<p><strong>Scope assumptions (v1).</strong> Standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. Native-ETH pools are declined at initialization <em>by choice, not necessity</em>: v4 supports native ETH as <code>currency0</code>, but the lending flows are built on ERC-20 pull semantics (vault deposits, <code>transferFrom</code> on open and repay), and supporting native would add payable entry points and ETH-send reentrancy surface for no market coverage — WETH pairs serve the same asset. Native support is a deliberate deferral. Chains with transient storage (Cancun+).</p>
+<p><strong>Scope assumptions (v1).</strong> Standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. <strong>Native-ETH pools are fully supported</strong> by bridging the native side to canonical WETH at the hook boundary: <code>open</code> and <code>repay</code> are payable (raw ETH wrapped on arrival), vaults hold WETH, chunk settlement unwraps/wraps against the PoolManager, and <em>all user-facing payouts are WETH</em> — deliberately, since paying raw ETH to borrowers inside swap callbacks would let a reverting <code>receive()</code> block the very transactions that close a position. Chains with transient storage (Cancun+).</p>
 
 <p><strong>Tested invariants</strong> (randomized sequences of open / repay / swap / poke / forceClose): the hook holds exactly the sum of open positions' collateral; position debt shares reconcile with vault totals; vault balances cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.</p>
 
@@ -730,6 +730,23 @@
 
 <p><strong>Perpetual-style leverage.</strong> A leveraged long <em>is</em> a looped TrueLend position (deposit ETH → borrow USDC → buy ETH → redeposit), constructible atomically by a small periphery router with the liquidation engine unchanged. The dictionary: initial margin = 1−LTV; <strong>maintenance margin = 1−LT</strong> (LT 99% ⇒ 1% maintenance margin); bankruptcy price = the range's far edge; the range interior = a progressive auto-deleveraging zone replacing one-shot ADL. Funding emerges organically: long open interest borrows one vault, short open interest the other, so OI skew becomes utilization skew becomes a rate differential — funding without a funding oracle. The §3 impossibility applies to perp margin identically, which is precisely why the chunk engine transfers intact.</p>
 
+<p><em>Maximum leverage, derived.</em> The loop is a geometric series: margin <var>M</var> is deposited, a fraction LTV of its value is borrowed, swapped into the collateral asset, and redeposited, so total exposure is <var>E</var> = <var>M</var>·(1 + LTV + LTV² + …) = <var>M</var>/(1−LTV), hence:</p>
+
+<div class="formula">
+  λ = <span class="frac"><span><var>E</var></span><span><var>M</var></span></span> = <span class="frac"><span>1</span><span>1 − LTV</span></span>,
+  &nbsp;&nbsp;&nbsp; λ<sub>max</sub> = <span class="frac"><span>1</span><span>1 − <var>h</var>·LT<sub>max</sub></span></span>
+  <span class="fnote">h = 95% opening headroom · LT_max = simulated tier cap</span>
+</div>
+
+<div class="tablewrap"><table>
+  <tr><th>Tier</th><th>LT_max</th><th>max LTV = h·LT_max</th><th>λ_max</th></tr>
+  <tr><td>Stable</td><td>99%</td><td>94.05%</td><td><strong>16.8×</strong></td></tr>
+  <tr><td>Major</td><td>95%</td><td>90.25%</td><td><strong>10.3×</strong></td></tr>
+  <tr><td>Long-tail</td><td>90%</td><td>85.5%</td><td><strong>6.9×</strong></td></tr>
+</table></div>
+
+<p>A perp-profile pool config could raise <var>h</var> (at <var>h</var> = 99%, LT 99%: λ = 50×), but thinner headroom means positions enter their ranges far more often, so each step must re-clear the tolerance constraints of the parameter model — the ceiling formula is structural, the safe value is empirical.</p>
+
 <p><strong>Safe-side automation.</strong> Take-profit range orders — auto-deleveraging into strength — are the one passive order type the AMM <em>does</em> offer, and compose naturally as an opt-in periphery feature.</p>
 
 <h2><span class="no">10</span>Implementation and status</h2>
@@ -739,8 +756,8 @@
 <p><strong>Deployment — Unichain Sepolia (1301):</strong></p>
 <div class="tablewrap"><table>
   <tr><th>Contract</th><th>Address</th></tr>
-  <tr><td>TrueLendHook</td><td><code>0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0</code></td></tr>
-  <tr><td>VaultFactory</td><td><code>0x29076c8Bf089Ab07A146d3fc528A1CF3F4b2CB2b</code></td></tr>
+  <tr><td>TrueLendHook</td><td><code>0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0</code></td></tr>
+  <tr><td>VaultFactory</td><td><code>0xb95f855B1252c51A3AD167b3D1F5ab8B121107E6</code></td></tr>
   <tr><td>PoolManager (canonical)</td><td><code>0x00B036B58a818B1BC34d502D3fE730Db729e62AC</code></td></tr>
 </table></div>
 

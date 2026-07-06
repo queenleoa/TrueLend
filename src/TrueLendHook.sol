@@ -13,12 +13,16 @@ import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
-import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 
 import {LendingVault} from "./LendingVault.sol";
+
+interface IWETH9 {
+    function deposit() external payable;
+    function withdraw(uint256) external;
+}
 import {VaultFactory} from "./VaultFactory.sol";
 import {LiqRangeMath} from "./libraries/LiqRangeMath.sol";
 import {ChunkMath} from "./libraries/ChunkMath.sol";
@@ -101,6 +105,9 @@ contract TrueLendHook is BaseHook {
 
     address public owner;
     VaultFactory public immutable vaultFactory;
+    /// canonical wrapped-native token; the native side of a pool is bridged to
+    /// this at the hook boundary so vaults and user payouts never touch raw ETH
+    address public immutable WETH;
 
     mapping(PoolId => PoolState) internal pools;
     mapping(PoolId => Config) internal configs; // read via getConfig()
@@ -138,7 +145,7 @@ contract TrueLendHook is BaseHook {
 
     error NotOwner();
     error Reentrancy();
-    error NativeNotSupported();
+    error NativeValueMismatch();
     error PoolNotEnabled();
     error OracleNotReady();
     error LtOutOfBounds();
@@ -146,7 +153,6 @@ contract TrueLendHook is BaseHook {
     error AmountTooLarge();
     error LtvTooHigh();
     error GapTooSmall();
-    error CoverageInsufficient();
     error PositionNotActive();
     error NotEligibleForForceClose();
     error UnknownAction();
@@ -163,11 +169,23 @@ contract TrueLendHook is BaseHook {
         _;
     }
 
-    constructor(IPoolManager _poolManager, VaultFactory _factory, address _owner) BaseHook(_poolManager) {
+    constructor(IPoolManager _poolManager, VaultFactory _factory, address _owner, address _weth)
+        BaseHook(_poolManager)
+    {
         // explicit owner: deploying through a CREATE2 proxy makes msg.sender the
         // proxy, which would brick setConfig/setOwner
         owner = _owner;
         vaultFactory = _factory;
+        WETH = _weth;
+    }
+
+    /// raw ETH enters only from the PoolManager (native `take`) and WETH9
+    /// (`withdraw`); user-facing flows are payable entrypoints or WETH transfers
+    receive() external payable {}
+
+    /// the ERC-20 the hook and vaults use for a pool currency (WETH for native)
+    function _assetOf(Currency c) internal view returns (ERC20) {
+        return c.isAddressZero() ? ERC20(WETH) : ERC20(Currency.unwrap(c));
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -192,11 +210,10 @@ contract TrueLendHook is BaseHook {
     // ------------------------------------------------------------------ hook callbacks
 
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick) internal override returns (bytes4) {
-        if (key.currency0.isAddressZero()) revert NativeNotSupported();
         PoolId poolId = key.toId();
 
-        ERC20 asset0 = ERC20(Currency.unwrap(key.currency0));
-        ERC20 asset1 = ERC20(Currency.unwrap(key.currency1));
+        ERC20 asset0 = _assetOf(key.currency0);
+        ERC20 asset1 = _assetOf(key.currency1);
         LendingVault v0 = vaultFactory.deploy(asset0, address(this));
         LendingVault v1 = vaultFactory.deploy(asset1, address(this));
         asset0.safeApprove(address(v0), type(uint256).max);
@@ -242,7 +259,9 @@ contract TrueLendHook is BaseHook {
     {
         PoolId poolId = key.toId();
         _walkTriggers(key, poolId);
-        _processQueue(key, poolId, MAX_CHUNKS_PER_SWAP);
+        // no executor reward on the swap path: the hook only sees the router
+        // address, not the end swapper, so a rebate would strand with routers
+        _processQueue(key, poolId, MAX_CHUNKS_PER_SWAP, address(0));
         _walkTriggers(key, poolId); // chunks move the tick; pick up newly crossed triggers
         return (BaseHook.afterSwap.selector, 0);
     }
@@ -256,7 +275,7 @@ contract TrueLendHook is BaseHook {
         uint256 collateralAmount,
         uint256 borrowAmount,
         uint16 ltBps
-    ) external nonReentrant returns (bytes32 positionId) {
+    ) external payable nonReentrant returns (bytes32 positionId) {
         PoolId poolId = key.toId();
         PoolState storage pool = pools[poolId];
         Config memory cfg = configs[poolId];
@@ -292,10 +311,18 @@ contract TrueLendHook is BaseHook {
             if (tickStart < spotTick + cfg.minGapTicks) revert GapTooSmall();
         }
 
-        // 3. move funds and register
+        // 3. move funds and register. Native collateral (always currency0) may be
+        // sent as msg.value and is wrapped immediately; the hook custodies WETH.
         LendingVault vault = collateralIs0 ? pool.vault1 : pool.vault0;
-        ERC20(Currency.unwrap(collateralIs0 ? key.currency0 : key.currency1))
-            .safeTransferFrom(msg.sender, address(this), collateralAmount);
+        if (msg.value > 0) {
+            if (!(collateralIs0 && key.currency0.isAddressZero()) || msg.value != collateralAmount) {
+                revert NativeValueMismatch();
+            }
+            IWETH9(WETH).deposit{value: msg.value}();
+        } else {
+            _assetOf(collateralIs0 ? key.currency0 : key.currency1)
+                .safeTransferFrom(msg.sender, address(this), collateralAmount);
+        }
         uint256 debtShares = vault.borrow(borrowAmount, msg.sender);
         if (debtShares > type(uint128).max) revert AmountTooLarge();
 
@@ -338,14 +365,20 @@ contract TrueLendHook is BaseHook {
 
     /// @notice Repay debt (anyone can pay for any position). Full repayment closes
     /// the position and returns remaining collateral to the borrower.
-    function repay(bytes32 positionId, uint256 assets) external nonReentrant {
+    function repay(bytes32 positionId, uint256 assets) external payable nonReentrant {
         Position storage pos = positions[positionId];
         if (pos.borrower == address(0)) revert PositionNotActive();
         if (assets == 0) revert AmountTooSmall();
         LendingVault vault = _debtVault(pos);
 
         ERC20 debtAsset = vault.asset();
-        debtAsset.safeTransferFrom(msg.sender, address(this), assets);
+        if (msg.value > 0) {
+            // native repayment: only valid when the debt side is native
+            if (address(debtAsset) != WETH || msg.value != assets) revert NativeValueMismatch();
+            IWETH9(WETH).deposit{value: msg.value}();
+        } else {
+            debtAsset.safeTransferFrom(msg.sender, address(this), assets);
+        }
         (uint256 burned, uint256 used) = vault.repay(assets, pos.debtShares);
         pos.debtShares -= uint128(burned);
         if (assets > used) debtAsset.safeTransfer(msg.sender, assets - used); // refund excess
@@ -385,7 +418,7 @@ contract TrueLendHook is BaseHook {
 
         if (action == ACTION_POKE) {
             _walkTriggers(pool.key, poolId);
-            _processQueue(pool.key, poolId, MAX_CHUNKS_PER_POKE);
+            _processQueue(pool.key, poolId, MAX_CHUNKS_PER_POKE, caller); // poke incentive
             _walkTriggers(pool.key, poolId);
         } else if (action == ACTION_FORCE_CLOSE) {
             _executeForceClose(pool.key, positionId, caller);
@@ -452,7 +485,7 @@ contract TrueLendHook is BaseHook {
 
     // ------------------------------------------------------------------ chunk engine
 
-    function _processQueue(PoolKey memory key, PoolId poolId, uint256 maxChunks) internal {
+    function _processQueue(PoolKey memory key, PoolId poolId, uint256 maxChunks, address rewardTo) internal {
         bytes32[] storage queue = liqQueue[poolId];
         uint256 executed;
         uint256 scanned;
@@ -475,14 +508,14 @@ contract TrueLendHook is BaseHook {
                 continue; // same cursor now holds a different entry (or shrank)
             }
 
-            if (_executeChunk(key, positionId)) executed++;
+            if (_executeChunk(key, positionId, rewardTo)) executed++;
             queueCursor[poolId] = cursor + 1;
         }
     }
 
     /// @dev Sell one due chunk of collateral into the pool. Returns true if a
     /// chunk was executed. Assumes unlocked PoolManager context.
-    function _executeChunk(PoolKey memory key, bytes32 positionId) internal returns (bool) {
+    function _executeChunk(PoolKey memory key, bytes32 positionId, address rewardTo) internal returns (bool) {
         Position storage pos = positions[positionId];
         PoolId poolId = pos.poolId;
         Config memory cfg = configs[poolId];
@@ -490,7 +523,9 @@ contract TrueLendHook is BaseHook {
 
         // depth of in-range liquidity across this position's own range, measured
         // in collateral-token units: pressure metric + per-chunk impact cap
-        uint256 depthTokens = _rangeDepthTokens(poolId, pos);
+        uint256 depthTokens = LiqRangeMath.rangeDepthTokens(
+            pos.collateralIs0, pos.tickStart, pos.tickEnd, poolManager.getLiquidity(poolId)
+        );
         if (depthTokens == 0) return false; // no liquidity to sell into
 
         uint256 chunk = ChunkMath.chunkSize(
@@ -513,13 +548,15 @@ contract TrueLendHook is BaseHook {
         pos.collateral -= uint128(chunk);
         pos.lastChunkAt = uint40(block.timestamp);
 
-        (uint256 consumed, uint256 proceeds, uint256 penalty) =
-            _swapCollateral(key, pos, chunk, _currentPenaltyBps(pos, cfg), 0);
+        (uint256 consumed, uint256 proceeds, uint256 penalty, uint256 reward) = _swapCollateral(
+            key, pos, chunk, _currentPenaltyBps(pos, cfg), 0, rewardTo == address(0) ? 0 : cfg.rewardBps
+        );
         if (consumed < chunk) pos.collateral += uint128(chunk - consumed); // unbounded limit: only at pool edge
 
         // repay the vault with net proceeds
         LendingVault vault = _debtVault(pos);
-        uint256 net = proceeds - penalty;
+        uint256 net = proceeds - penalty - reward;
+        if (reward > 0) vault.asset().safeTransfer(rewardTo, reward);
         uint256 used;
         uint256 burned;
         if (net > 0) {
@@ -550,8 +587,9 @@ contract TrueLendHook is BaseHook {
         Position storage pos,
         uint256 amount,
         uint256 penaltyBps_,
-        uint160 sqrtPriceLimit
-    ) internal returns (uint256 consumed, uint256 proceeds, uint256 penalty) {
+        uint160 sqrtPriceLimit,
+        uint256 rewardBps_
+    ) internal returns (uint256 consumed, uint256 proceeds, uint256 penalty, uint256 reward) {
         bool zeroForOne = pos.collateralIs0;
         if (sqrtPriceLimit == 0) {
             sqrtPriceLimit = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
@@ -570,11 +608,20 @@ contract TrueLendHook is BaseHook {
 
         // pay the consumed collateral in
         if (consumed > 0) {
-            (zeroForOne ? key.currency0 : key.currency1).settle(poolManager, address(this), consumed, false);
+            Currency cin = zeroForOne ? key.currency0 : key.currency1;
+            if (cin.isAddressZero()) IWETH9(WETH).withdraw(consumed);
+            cin.settle(poolManager, address(this), consumed, false);
         }
 
-        // donate penalty to in-range LPs (skip if pool momentarily has no active liquidity)
+        // donate penalty to in-range LPs (skip if pool momentarily has no active
+        // liquidity); an executor reward — the poke incentive — is carved out of
+        // the penalty first, never out of the borrower beyond it
         penalty = FullMath.mulDiv(proceeds, penaltyBps_, BPS);
+        if (rewardBps_ > 0) {
+            reward = FullMath.mulDiv(proceeds, rewardBps_, BPS);
+            if (reward > penalty) reward = penalty;
+            penalty -= reward;
+        }
         if (penalty > 0 && poolManager.getLiquidity(pos.poolId) > 0) {
             if (zeroForOne) poolManager.donate(key, 0, penalty, "");
             else poolManager.donate(key, penalty, 0, "");
@@ -584,7 +631,9 @@ contract TrueLendHook is BaseHook {
 
         // take net proceeds
         if (proceeds > penalty) {
-            (zeroForOne ? key.currency1 : key.currency0).take(poolManager, address(this), proceeds - penalty, false);
+            Currency cout = zeroForOne ? key.currency1 : key.currency0;
+            cout.take(poolManager, address(this), proceeds - penalty, false);
+            if (cout.isAddressZero()) IWETH9(WETH).deposit{value: proceeds - penalty}();
         }
     }
 
@@ -616,8 +665,8 @@ contract TrueLendHook is BaseHook {
                 if (limitTick > TickMath.MAX_TICK) limitTick = TickMath.MAX_TICK - 1;
                 limit = TickMath.getSqrtPriceAtTick(limitTick);
             }
-            (uint256 consumed, uint256 proceeds, uint256 penalty) =
-                _swapCollateral(key, pos, collateralToSell, _currentPenaltyBps(pos, cfg), limit);
+            (uint256 consumed, uint256 proceeds, uint256 penalty,) =
+                _swapCollateral(key, pos, collateralToSell, _currentPenaltyBps(pos, cfg), limit, 0);
             if (consumed < collateralToSell) pos.collateral = uint128(collateralToSell - consumed);
 
             // caller reward comes out of the penalty flow, not the borrower's hide
@@ -694,7 +743,9 @@ contract TrueLendHook is BaseHook {
         delete positions[positionId]; // also drops it from the queue lazily
 
         if (collateralBack > 0) {
-            ERC20(Currency.unwrap(collateralIs0 ? key.currency0 : key.currency1)).safeTransfer(borrower, collateralBack);
+            // native collateral is custodied as WETH; payouts are always ERC-20,
+            // so a reverting receive() can never block a close
+            _assetOf(collateralIs0 ? key.currency0 : key.currency1).safeTransfer(borrower, collateralBack);
         }
         emit PositionClosed(positionId, collateralBack, shortfall);
     }
@@ -710,19 +761,6 @@ contract TrueLendHook is BaseHook {
         // at high LT (parameter-model finding, PARAMETERS.md)
         uint256 quarterGap = (BPS - pos.ltBps) / 4;
         return raw > quarterGap ? quarterGap : raw;
-    }
-
-    /// @dev Token depth of current in-range liquidity spread across the position's
-    /// range, in collateral-token units. Rough but cheap and monotone.
-    function _rangeDepthTokens(PoolId poolId, Position storage pos) internal view returns (uint256) {
-        uint128 liquidity = poolManager.getLiquidity(poolId);
-        if (liquidity == 0) return 0;
-        (uint160 lo, uint160 hi) = pos.tickStart < pos.tickEnd
-            ? (TickMath.getSqrtPriceAtTick(pos.tickStart), TickMath.getSqrtPriceAtTick(pos.tickEnd))
-            : (TickMath.getSqrtPriceAtTick(pos.tickEnd), TickMath.getSqrtPriceAtTick(pos.tickStart));
-        return pos.collateralIs0
-            ? SqrtPriceMath.getAmount0Delta(lo, hi, liquidity, false)
-            : SqrtPriceMath.getAmount1Delta(lo, hi, liquidity, false);
     }
 
     function _debtVault(Position storage pos) internal view returns (LendingVault) {

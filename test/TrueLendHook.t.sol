@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {WETH} from "solmate/src/tokens/WETH.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -30,6 +31,7 @@ contract TrueLendHookTest is Test, Deployers {
 
     TrueLendHook hook;
     VaultFactory factory;
+    WETH weth9;
     PoolKey poolKey;
     PoolId poolId;
     LendingVault vault0;
@@ -52,14 +54,15 @@ contract TrueLendHookTest is Test, Deployers {
         if (address(token0) > address(token1)) (token0, token1) = (token1, token0);
 
         factory = new VaultFactory();
+        weth9 = new WETH();
         // mine + CREATE2, exactly like production deployment (links libraries)
         (address hookAddress, bytes32 hookSalt) = HookMiner.find(
             address(this),
             uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG),
             type(TrueLendHook).creationCode,
-            abi.encode(address(manager), address(factory), address(this))
+            abi.encode(address(manager), address(factory), address(this), address(weth9))
         );
-        hook = new TrueLendHook{salt: hookSalt}(manager, factory, address(this));
+        hook = new TrueLendHook{salt: hookSalt}(manager, factory, address(this), address(weth9));
         require(address(hook) == hookAddress, "hook address mismatch");
 
         poolKey = PoolKey({
@@ -291,18 +294,6 @@ contract TrueLendHookTest is Test, Deployers {
         vm.stopPrank();
     }
 
-    function test_open_rejectsNativePools() public {
-        PoolKey memory nativeKey = PoolKey({
-            currency0: Currency.wrap(address(0)),
-            currency1: Currency.wrap(address(token1)),
-            fee: 3000,
-            tickSpacing: 60,
-            hooks: IHooks(address(hook))
-        });
-        vm.expectRevert(); // NativeNotSupported, wrapped by the hook-call dispatcher
-        manager.initialize(nativeKey, SQRT_PRICE_1_1);
-    }
-
     // ------------------------------------------------------------------ manipulation defense
 
     function test_open_manipulatedPriceDoesNotRaiseBorrowLimit() public {
@@ -453,6 +444,19 @@ contract TrueLendHookTest is Test, Deployers {
         uint256 sold2 = coll1 - hook.getPosition(id).collateral;
         assertGt(sold2, sold1 * 3, "catch-up chunk is larger");
         assertLt(sold2, sold1 * 8, "...but capped");
+    }
+
+    /// poke pays its caller a reward carved out of the penalty flow — the
+    /// keeper incentive for quiet markets.
+    function test_poke_paysCallerReward() public {
+        bytes32 id = _openDefault();
+        _swap(true, 40_000e18);
+        skip(61);
+        uint256 before = token1.balanceOf(keeper);
+        vm.prank(keeper);
+        hook.poke(poolKey);
+        assertLt(hook.getPosition(id).collateral, 100e18, "chunk executed");
+        assertGt(token1.balanceOf(keeper), before, "poker rewarded from penalty flow");
     }
 
     function test_liquidation_fullDebtRepayment_closesAndReturnsRemainder() public {

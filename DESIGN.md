@@ -207,7 +207,7 @@ A naive engine would iterate every open position on every swap — v1 did, and i
 
 The pool's liquidity is the engine's counterparty, so every selling path is sized against *measured* depth, in the same transaction that sells:
 
-- **Chunks** are capped at 1% of the token depth of in-range liquidity across the position's own range. A thin book means proportionally smaller chunks (while the pacing formula's pressure term quickens the cadence, so decay proceeds as more, smaller steps). **Zero in-range liquidity → the chunk is skipped entirely**; the position waits.
+- **Chunks** are capped at 1% of the token depth of in-range liquidity across the position's own range, re-measured in the transaction that sells. "Thinner books, smaller chunks" is proportionality *to the pool's depth, not the position*: a thin venue gets smaller absolute slices while the pressure term quickens the cadence — more, smaller steps, bounded impact everywhere. **Zero in-range liquidity → the chunk is skipped entirely**; the position waits. There is no stranded remainder at the other end either: decay normally terminates on *debt* reaching zero (final-chunk excess routes to the borrower, remaining collateral goes home), each chunk is clamped to what remains, and dust positions finish in a single chunk because integer division makes the base the whole remainder.
 - **forceClose** sales carry the hard ~10% price-impact bound described in §2.5, fill partially against thin books, and retry. The adversarial version — pull all LP liquidity, then trigger a backstop sale into your own dust bid — is thereby structurally unprofitable.
 - **Penalty donations** need an in-range LP recipient (a v4 rule); when none exists the penalty simply stays with the proceeds and retires more debt instead.
 
@@ -269,7 +269,7 @@ Who controls each number, with defaults. Entries marked ★ are risk parameters 
 | | max LT ★ | 99% | tier by volatility & depth per PARAMETERS.md |
 | | per-chunk depth cap ★ | 1% of in-range depth | no chunk meaningfully moves price |
 | | term | 180 days | bounds silent interest erosion |
-| | forceClose reward | 0.1% of proceeds | pays the anonymous closer |
+| | executor reward | 0.1% of proceeds | pays forceClose callers and `poke` callers, carved from the penalty flow (swapper rebates are infeasible: the hook sees routers, not traders) |
 | | minimum borrow ★ | 0 — **owner must set** | keeper gas economics; dust defense |
 | **Protocol constants** | LTV headroom 95% · walk caps (8 ticks / 32 refreshes) · 2 chunks per swap, 10 per poke · forceClose impact bound ~10% · filter (60 s × 9 obs, ±9,116-tick clamp) | — | mechanical safety; not risk-tuned |
 | **Interest model**, per vault | 0% base · 4% at kink 80% · +100% above · hard cap 90% · reserve 10% | — | liquidity buffer + first-loss capital |
@@ -282,7 +282,7 @@ Implemented, green, and deployed: 78 tests (fuzzed library units, vault accounti
 
 **Invariants held under randomized action sequences:** the hook holds exactly the sum of open positions' collateral (nothing strands, nothing leaks); position debt shares reconcile with vault totals; vault balances always cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.
 
-**Security posture (v1 scope):** standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. Native-ETH pools are declined at initialization by choice (v4 supports native as `currency0`; the vault flows need ERC-20 pull semantics, and WETH pairs serve the same market — native support is a deliberate deferral); checks-effects-interactions ordering plus reentrancy guards on all entry points; strictly bounded per-swap work; owner powers limited to per-pool config (timelock it for production). Not audited. Deliberately deferred to keep v1 simple: per-block borrow caps, aggregate per-tick-region exposure caps, LT-scaled interest premiums, configurable opening headroom.
+**Security posture (v1 scope):** standard ERC-20 tokens — no fee-on-transfer, rebasing, or transfer-hook tokens. **Native-ETH pools are supported** via WETH bridging at the hook boundary: payable `open`/`repay` wrap raw ETH on arrival, vaults hold WETH, chunk settlement unwraps/wraps against the PoolManager, and all user payouts are WETH (raw-ETH payouts inside swap callbacks would let a reverting `receive()` block position closes); checks-effects-interactions ordering plus reentrancy guards on all entry points; strictly bounded per-swap work; owner powers limited to per-pool config (timelock it for production). Not audited. Deliberately deferred to keep v1 simple: per-block borrow caps, aggregate per-tick-region exposure caps, LT-scaled interest premiums, configurable opening headroom.
 
 ---
 

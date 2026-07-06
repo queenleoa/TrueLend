@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {WETH} from "solmate/src/tokens/WETH.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
@@ -128,6 +129,7 @@ contract TrueLendInvariantsTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
 
     TrueLendHook hook;
+    WETH weth9;
     Handler handler;
     PoolKey poolKey;
     PoolId poolId;
@@ -144,14 +146,15 @@ contract TrueLendInvariantsTest is Test, Deployers {
         if (address(token0) > address(token1)) (token0, token1) = (token1, token0);
 
         VaultFactory factory = new VaultFactory();
+        weth9 = new WETH();
         // mine + CREATE2, exactly like production deployment (links libraries)
         (address hookAddress, bytes32 hookSalt) = HookMiner.find(
             address(this),
             uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG),
             type(TrueLendHook).creationCode,
-            abi.encode(address(manager), address(factory), address(this))
+            abi.encode(address(manager), address(factory), address(this), address(weth9))
         );
-        hook = new TrueLendHook{salt: hookSalt}(manager, factory, address(this));
+        hook = new TrueLendHook{salt: hookSalt}(manager, factory, address(this), address(weth9));
         require(address(hook) == hookAddress, "hook address mismatch");
 
         poolKey = PoolKey({

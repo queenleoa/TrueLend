@@ -176,7 +176,7 @@ $$
 \qquad \text{capped at } 1\% \text{ of measured in-range depth.}
 $$
 
-Read as behavior: about 1% of the remainder per minute at baseline; missed intervals catch up (capped); danger-depth and pool-thinness each at most double the pace; and the depth cap means **no chunk can meaningfully move the price** — the anti-cascade property as a formula. Full decay takes roughly 100 minutes typically, and at least ~25 even with every multiplier maxed.
+Read as behavior: about 1% of the remainder per minute at baseline; missed intervals catch up (capped); danger-depth and pool-thinness each at most double the pace; and the depth cap — 1% of the pool's own measured depth, not of the position — means **no chunk can meaningfully move the price** in any venue: thin books get smaller absolute slices at a quicker cadence. Termination is remainder-free: decay ends on debt reaching zero with final-chunk excess routed to the borrower, each chunk is clamped to what remains, and dust finishes in one chunk. Full decay takes roughly 100 minutes typically, and at least ~25 even with every multiplier maxed.
 
 **6.4 Penalty.** Per chunk: $\text{penalty} = \text{proceeds} \times 0.5\% \times \frac{\mathrm{LT}}{100\%} \times \min(1 + t_{inLiq}/1\text{h}, 5)$ — scaling with the risk the borrower chose and the time LPs have carried the flow, capped so prolonged decay is not confiscatory.
 
@@ -215,6 +215,8 @@ Faster pacing shrinks $\mu$ but raises $s$; wider ranges lower $s$ per tick but 
 Short answer: **yes — a perp on this engine is a looped TrueLend loan, and the liquidation mechanism carries over unchanged.** What changes is vocabulary and one periphery contract.
 
 **The construction.** A leveraged long on ETH margined in USDC reduces to *hold ETH, owe USDC* — which is a TrueLend position. Leverage comes from looping: deposit ETH, borrow USDC, buy ETH with it, add that to the collateral, repeat — and a small periphery "LeverageRouter" can do the whole loop atomically in one transaction. The result is a single hook position where exposure is the total ETH held, margin is what the trader actually funded, and leverage $= 1/(1-\mathrm{LTV})$: 94% LTV is ~17×, 98% is 50×. A short is the mirror image, in the direction the hook already supports.
+
+**Maximum leverage, derived.** The loop is a geometric series: margin $M$ in, borrow $\mathrm{LTV}$ of it, swap, redeposit — exposure $E = M\sum_k \mathrm{LTV}^k = M/(1-\mathrm{LTV})$, so $\lambda = 1/(1-\mathrm{LTV})$, and with the opening headroom $h=95\%$ and the simulated tier caps, $\lambda_{max} = 1/(1-h\cdot\mathrm{LT}_{max})$: **16.8× stable · 10.3× major · 6.9× long-tail** (a perp-profile config raising $h$ to 99% reaches 50× at LT 99, subject to re-clearing the parameter model's tolerances).
 
 **The dictionary.** Initial margin = $1-\mathrm{LTV}$ at open. **Maintenance margin = $1-\mathrm{LT}$** — an LT-99 position runs 1% maintenance margin. The bankruptcy price is the range's far edge, and the range interior becomes a *progressive auto-deleveraging zone*: losses realize gradually through the band instead of via one-shot ADL. The funding rate emerges with no funding oracle at all: long open interest borrows the USDC vault while short open interest borrows the ETH vault, so a skew in open interest becomes a skew in utilizations becomes a rate differential — funding discovered by the same kink curve that prices ordinary borrowing.
 

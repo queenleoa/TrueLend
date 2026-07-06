@@ -20,16 +20,18 @@ contract Deploy is Script {
         IPoolManager poolManager = IPoolManager(vm.envAddress("POOL_MANAGER"));
 
         address owner = vm.envAddress("WALLET_ADDRESS");
+        // canonical wrapped native (OP-stack chains incl. Unichain: 0x4200...0006)
+        address weth = vm.envOr("WETH", address(0x4200000000000000000000000000000000000006));
 
         vm.startBroadcast();
         VaultFactory factory = new VaultFactory();
 
         uint160 flags = uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG);
-        bytes memory constructorArgs = abi.encode(poolManager, factory, owner);
+        bytes memory constructorArgs = abi.encode(poolManager, factory, owner, weth);
         (address hookAddress, bytes32 salt) =
             HookMiner.find(CREATE2_FACTORY_ADDRESS, flags, type(TrueLendHook).creationCode, constructorArgs);
 
-        TrueLendHook hook = new TrueLendHook{salt: salt}(poolManager, factory, owner);
+        TrueLendHook hook = new TrueLendHook{salt: salt}(poolManager, factory, owner, weth);
         require(address(hook) == hookAddress, "hook address mismatch");
         vm.stopBroadcast();
 

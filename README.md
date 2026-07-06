@@ -24,14 +24,14 @@ lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueL
 ```
 
 1. **Open**: borrower deposits one pool currency as collateral, borrows the other from that side's vault. Collateral is valued at the *worse of* spot and a truncated median of the pool's own recent ticks (single-block price pumps don't raise borrow limits). The position gets a liquidation range starting at its LT price, ~√2 wide.
-2. **Decay**: when the pool tick is inside the range, each swap's `afterSwap` (or a permissionless `poke`) sells a paced chunk of collateral, donates a penalty to in-range LPs via `donate()`, and repays the vault. Price leaves the range → decay pauses; re-enters → resumes.
+2. **Decay**: when the pool tick is inside the range, each swap's `afterSwap` (or a permissionless `poke`, which pays its caller from the penalty flow) sells a paced chunk of collateral, donates a penalty to in-range LPs via `donate()`, and repays the vault. Price leaves the range → decay pauses; re-enters → resumes.
 3. **Backstop**: past the range end, past the term (180d), or health-breached, anyone may `forceClose` for a reward — a slippage-bounded sale that partially fills against thin books and retries. Shortfalls hit vault reserves first, then socialize pro-rata — a declared waterfall, not an implicit one.
 
 ## Contracts
 
 | Contract | Role |
 |---|---|
-| [`TrueLendHook`](src/TrueLendHook.sol) | hook + lending core; one instance serves many pools — initializing any ERC20/ERC20 pool with this hook makes it a lending market |
+| [`TrueLendHook`](src/TrueLendHook.sol) | hook + lending core; one instance serves many pools — initializing any pool with this hook (ERC-20 pairs and native-ETH pools, the latter WETH-bridged at the hook boundary) makes it a lending market |
 | [`LendingVault`](src/LendingVault.sol) | per-currency lender vault: shares, borrow index, kinked IRM (kink 80%, hard cap 90%), 10% reserve factor |
 | [`VaultFactory`](src/VaultFactory.sol) | deploys the two vaults per pool at initialization |
 | [`libraries/LiqRangeMath`](src/libraries/LiqRangeMath.sol) | decimals-safe Q96 liquidation-range placement, both borrow directions |
@@ -62,8 +62,8 @@ Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` fla
 
 | Network | Contract | Address |
 |---|---|---|
-| Unichain Sepolia (1301) | TrueLendHook | [`0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0`](https://sepolia.uniscan.xyz/address/0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0) |
-| Unichain Sepolia (1301) | VaultFactory | `0x29076c8Bf089Ab07A146d3fc528A1CF3F4b2CB2b` |
+| Unichain Sepolia (1301) | TrueLendHook | [`0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0`](https://sepolia.uniscan.xyz/address/0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0) |
+| Unichain Sepolia (1301) | VaultFactory | `0xb95f855B1252c51A3AD167b3D1F5ab8B121107E6` |
 | Unichain Sepolia (1301) | PoolManager (canonical) | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
 
 ## Status & roadmap

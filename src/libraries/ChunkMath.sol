@@ -27,7 +27,7 @@ library ChunkMath {
         uint256 maxChunk; // absolute cap for a single chunk
     }
 
-    function chunkSize(Params memory p) internal pure returns (uint256) {
+    function chunkSize(Params memory p) public pure returns (uint256) {
         if (p.remaining == 0 || p.interval == 0 || p.elapsed < p.interval) return 0;
 
         uint256 base = p.remaining / p.targetChunks;
@@ -53,7 +53,7 @@ library ChunkMath {
     ///   penaltyBps = base * (ltBps/1e4) * min(1 + timeInLiq/1h, timeCapX)
     /// The time factor uses 1-hour granularity like v1, capped.
     function penaltyBps(uint256 basePenaltyBps, uint16 ltBps, uint256 timeInLiquidation, uint256 timeCapX)
-        internal
+        public
         pure
         returns (uint256)
     {

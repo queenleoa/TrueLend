@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
@@ -89,7 +90,7 @@ library LiqRangeMath {
     }
 
     /// @notice Depth into the range in bps (0 at tickStart, 10_000 at tickEnd).
-    function depthBps(bool collateralIs0, int24 tick, int24 tickStart, int24 tickEnd) internal pure returns (uint256) {
+    function depthBps(bool collateralIs0, int24 tick, int24 tickStart, int24 tickEnd) public pure returns (uint256) {
         if (!inRange(collateralIs0, tick, tickStart, tickEnd)) {
             return pastRange(collateralIs0, tick, tickEnd) ? BPS : 0;
         }
@@ -101,12 +102,29 @@ library LiqRangeMath {
 
     /// @notice Value of `amount` of one currency in units of the other, at sqrtPriceX96.
     /// @param zeroForOne true: token0 amount -> token1 value; false: token1 -> token0.
-    function convertAtSqrtPrice(uint256 amount, uint160 sqrtPriceX96, bool zeroForOne) internal pure returns (uint256) {
+    function convertAtSqrtPrice(uint256 amount, uint160 sqrtPriceX96, bool zeroForOne) public pure returns (uint256) {
         if (zeroForOne) {
             // amount * P = amount * (sqrtP/2^96)^2, in two mulDivs to avoid overflow
             return FullMath.mulDiv(FullMath.mulDiv(amount, sqrtPriceX96, 1 << 96), sqrtPriceX96, 1 << 96);
         }
         return FullMath.mulDiv(FullMath.mulDiv(amount, 1 << 96, sqrtPriceX96), 1 << 96, sqrtPriceX96);
+    }
+
+    /// @notice Token depth of `liquidity` spread across [tickA, tickB], measured
+    /// in the collateral token's units. Rough but cheap and monotone — used for
+    /// the chunk pressure metric and the per-chunk impact cap.
+    function rangeDepthTokens(bool collateralIs0, int24 tickA, int24 tickB, uint128 liquidity)
+        public
+        pure
+        returns (uint256)
+    {
+        if (liquidity == 0) return 0;
+        (uint160 lo, uint160 hi) = tickA < tickB
+            ? (TickMath.getSqrtPriceAtTick(tickA), TickMath.getSqrtPriceAtTick(tickB))
+            : (TickMath.getSqrtPriceAtTick(tickB), TickMath.getSqrtPriceAtTick(tickA));
+        return collateralIs0
+            ? SqrtPriceMath.getAmount0Delta(lo, hi, liquidity, false)
+            : SqrtPriceMath.getAmount1Delta(lo, hi, liquidity, false);
     }
 
     function _alignUp(int24 tick, int24 spacing) private pure returns (int24) {

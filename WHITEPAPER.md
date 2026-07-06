@@ -130,7 +130,7 @@ $$
 \times\; \underbrace{(1 + \rho)}_{\substack{\text{position size /}\\\text{book depth} \in [0,1]}}
 $$
 
-clamped to $[\,\text{min},\, \min(\text{cap},\, C_{rem})\,]$, where the cap is 1% of the token depth of current in-range liquidity measured across the position's own range — **no single chunk can meaningfully move the price**, and thinner books produce proportionally smaller (but, via $\rho$, more frequent-in-effect) slices. With defaults ($N = 100$), full decay takes ≈100 minutes typically and ≥25 minutes even with every multiplier at its cap. This bound is the anti-cascade property in closed form: a crash that puts many positions in range produces many independent trickles, never an avalanche, because *each* position's sell flow is capped per interval.
+clamped to $[\,\text{min},\, \min(\text{cap},\, C_{rem})\,]$, where the cap is 1% of the token depth of current in-range liquidity measured across the position's own range, re-measured in the same transaction that sells — **no single chunk can meaningfully move the price**. "Thinner books produce smaller chunks" means proportional *to the pool's depth, not to the position*: a thin venue gets smaller absolute slices (bounded impact is preserved everywhere), while the $\rho$ term quickens the cadence, so decay proceeds as more, smaller steps. There is likewise no stranded remainder: decay normally ends when the *debt* reaches zero (the final chunk's excess proceeds route to the borrower and remaining collateral goes home); every chunk is clamped to what remains, so the last slice is simply smaller; and for true dust the base becomes the whole remainder, finishing the position in one chunk. With defaults ($N = 100$), full decay takes ≈100 minutes typically and ≥25 minutes even with every multiplier at its cap. This bound is the anti-cascade property in closed form: a crash that puts many positions in range produces many independent trickles, never an avalanche, because *each* position's sell flow is capped per interval.
 
 **Execution.** Chunks run lazily inside ordinary swaps:
 
@@ -154,7 +154,7 @@ sequenceDiagram
     PM-->>W: swapper settles normally — their execution is untouched
 ```
 
-The swapper whose trade crossed the trigger pays a bounded gas surcharge and unknowingly *is* the liquidation infrastructure; the chunk trades against the pool's LP liquidity in the same transaction. Detection is $O(\text{boundaries crossed})$: positions register their two range-boundary ticks in a per-pool bitmap, and `afterSwap` walks only set bits between the previous and current tick (capped at 8 ticks and 32 position updates per swap, with a persisted resume point). A permissionless `poke()` executes pending chunks in quiet markets, and the catch-up multiplier makes missed intervals self-correcting. There is no privileged operator anywhere in the system.
+The swapper whose trade crossed the trigger pays a bounded gas surcharge and unknowingly *is* the liquidation infrastructure; the chunk trades against the pool's LP liquidity in the same transaction. Detection is $O(\text{boundaries crossed})$: positions register their two range-boundary ticks in a per-pool bitmap, and `afterSwap` walks only set bits between the previous and current tick (capped at 8 ticks and 32 position updates per swap, with a persisted resume point). A permissionless `poke()` executes pending chunks in quiet markets — and pays its caller a reward carved out of the penalty flow, so keepers have a standing financial incentive without any privilege. (A rebate to *swappers* is not implementable at the hook layer: the hook observes the router's address, not the end trader's, so a rebate would strand with routers; the poke incentive is the workable form of the same idea.) The catch-up multiplier makes missed intervals self-correcting.
 
 **Penalty.** Each chunk donates a fee to the pool's in-range LPs:
 
@@ -258,7 +258,7 @@ where $s$ is chunk execution slippage and fees, $\pi$ the penalty share, $i(T)$ 
 | Vault share inflation | virtual-offset share pricing; vault-favoring rounding throughout |
 | Governance | owner powers limited to per-pool config; recommended behind a timelock |
 
-**Scope assumptions (v1):** standard ERC-20 pairs only — no fee-on-transfer, rebasing, or transfer-hook tokens. Native-ETH pools are declined at initialization *by choice, not necessity*: v4 supports native ETH as `currency0`, but the lending flows are built on ERC-20 pull semantics (vault deposits, `transferFrom` on open and repay), and supporting native would add payable entry points and ETH-send reentrancy surface for no market coverage — WETH pairs serve the same asset. Native support is a deliberate deferral. Cancun-capable chains (transient storage).
+**Scope assumptions (v1):** standard ERC-20 tokens — no fee-on-transfer, rebasing, or transfer-hook tokens. **Native-ETH pools are fully supported** by bridging the native side to canonical WETH at the hook boundary: `open` and `repay` are payable (raw ETH is wrapped on arrival), vaults hold WETH, chunk settlement unwraps/wraps against the PoolManager, and *all user-facing payouts are WETH* — deliberately, since paying raw ETH to borrowers inside swap callbacks would let a reverting `receive()` block the very transactions that close a position. Cancun-capable chains (transient storage).
 
 **Tested invariants** (randomized action sequences over open/repay/swap/poke/forceClose): the hook holds exactly the sum of open positions' collateral; position debt shares reconcile with vault totals; vault balances cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.
 
@@ -290,6 +290,24 @@ where $s$ is chunk execution slippage and fees, $\pi$ the penalty share, $i(T)$ 
 
 **Perpetual-style leverage.** A leveraged long *is* a looped TrueLend position (deposit ETH → borrow USDC → buy ETH → redeposit), constructible atomically by a ~150-line periphery router with the liquidation engine unchanged. The dictionary: initial margin = 1−LTV; **maintenance margin = 1−LT** (LT 99% ⇒ 1% MM); bankruptcy price = the range's far edge; the range interior = a progressive auto-deleveraging zone replacing one-shot ADL. Funding emerges organically: long open interest borrows one vault, short OI the other, so OI skew becomes utilization skew becomes a rate differential — funding without a funding oracle. The same §3 impossibility applies to perp margin (it cannot sit passively in the range), which is precisely why the chunk engine transfers intact.
 
+*Maximum leverage, derived.* The loop is a geometric series: margin $M$ is deposited, a fraction $\mathrm{LTV}$ of its value is borrowed, swapped into the collateral asset, and redeposited, so total exposure is
+
+$$
+E \;=\; M \sum_{k=0}^{\infty} \mathrm{LTV}^{\,k} \;=\; \frac{M}{1-\mathrm{LTV}},
+\qquad\text{hence}\qquad
+\lambda \;=\; \frac{E}{M} \;=\; \frac{1}{1-\mathrm{LTV}}.
+$$
+
+The protocol caps opening LTV at headroom $h = 95\%$ of the chosen LT, giving the structural ceiling $\lambda_{max} = 1/(1 - h\cdot\mathrm{LT}_{max})$ per pool tier. With the simulated tier caps:
+
+| Tier | $\mathrm{LT}_{max}$ | max LTV $= h\cdot\mathrm{LT}_{max}$ | $\lambda_{max}$ |
+|---|---|---|---|
+| Stable | 99% | 94.05% | **16.8×** |
+| Major | 95% | 90.25% | **10.3×** |
+| Long-tail | 90% | 85.5% | **6.9×** |
+
+A perp-profile pool config could raise $h$ (at $h=99\%$, LT 99%: $\lambda = 50\times$), but thinner headroom means positions enter their ranges far more often, so each step must re-clear the tolerance constraints of the parameter model — the ceiling formula is structural, the safe value is empirical.
+
 **Safe-side automation.** Take-profit range orders (auto-deleveraging into strength) are the one passive order type the AMM *does* offer and compose naturally as an opt-in periphery feature.
 
 **Gas.** The remaining optimization is holding chunk proceeds as PoolManager ERC-6909 claims rather than ERC-20 transfers per chunk; deliberately deferred for v1 simplicity.
@@ -300,7 +318,7 @@ where $s$ is chunk execution slippage and fees, $\pi$ the penalty share, $i(T)$ 
 
 Six contracts, ~1,600 lines of Solidity 0.8.26: `TrueLendHook` (lending core + engine, 23.3 kB), `LendingVault` ×2 per pool, `VaultFactory`, and libraries `LiqRangeMath`, `ChunkMath`, `TruncatedOracle`, `TriggerIndex` (the latter three deployed as linked libraries). Any ERC-20/ERC-20 pool initialized with the hook becomes a lending market automatically. 78 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 24 full-lifecycle integration scenarios (including LT-99 leverage, manipulation rejection, drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.
 
-**Deployment (Unichain Sepolia, chain 1301):** TrueLendHook `0x23B8aa9A6aF46d1d56090cb4A500EB0f2C2b10C0` · VaultFactory `0x29076c8Bf089Ab07A146d3fc528A1CF3F4b2CB2b` · against canonical PoolManager `0x00B036B58a818B1BC34d502D3fE730Db729e62AC`.
+**Deployment (Unichain Sepolia, chain 1301):** TrueLendHook `0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0` · VaultFactory `0xb95f855B1252c51A3AD167b3D1F5ab8B121107E6` · against canonical PoolManager `0x00B036B58a818B1BC34d502D3fE730Db729e62AC`.
 
 ## 11. Limitations and future work
 
