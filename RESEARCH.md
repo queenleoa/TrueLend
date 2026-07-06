@@ -10,7 +10,7 @@ Vocabulary follows [DESIGN.md](DESIGN.md), which defines every protocol term as 
 
 Imagine the most elegant version of AMM-native lending anyone could propose. The borrower's collateral is not held in escrow by a contract — it is deposited *into the pool itself*, as liquidity spanning the prices where the loan would be in trouble. If the price deteriorates, ordinary trading converts the collateral into the debt token automatically, piece by piece, with no keeper, no executor, and no gas spent by anyone. If the price recovers, trading converts it back. The pool liquidates the loan, and un-liquidates it, by itself.
 
-This idea is so natural that it has been independently proposed more than once — Instadapp named it the **inverse range order** in 2023 — and it was the first thing tried in TrueLend's own hackathon build. It does not work, and cannot be made to work. Understanding exactly why is the most valuable page in this report, because the impossibility is what forces every design that follows.
+The idea is natural enough to have been proposed independently more than once — Instadapp named it the **inverse range order** in 2023 — and it was the first construction attempted in TrueLend's own hackathon build. It does not work and cannot be made to work; the impossibility is what forces every design decision that follows.
 
 ### 1.1 What a liquidity position does as the price moves
 
@@ -151,7 +151,7 @@ During this redesign, an architecture was seriously evaluated that would have re
 
 It fails on §1 grounds, completely. The conversion it relies on runs in the stop direction, which passive liquidity cannot fill, in either borrow configuration; the band it requires cannot even be minted single-sided in the needed orientation; and the closed-form proceeds formula it quoted (the geometric-mean fill of a fully traversed range) is real mathematics for the *take-profit* direction, applied to the wrong traversal. In practice the position would convert when the loan got *safer* and sit inert as it got riskier.
 
-The evaluation still paid rent: everything direction-agnostic it produced was kept — the vault design, the price filter and its opening rules, the trigger bitmap, the term-and-backstop structure, the loss waterfall. And one fragment survives as a legitimate future feature: a take-profit range order on the *safe* side of a position (automatic deleveraging into strength) is exactly the order type the AMM does offer, and composes naturally as opt-in periphery.
+The evaluation was not wasted: everything direction-agnostic it produced was kept — the vault design, the price filter and its opening rules, the trigger bitmap, the term-and-backstop structure, the loss waterfall. And one fragment survives as a legitimate future feature: a take-profit range order on the *safe* side of a position (automatic deleveraging into strength) is exactly the order type the AMM does offer, and composes naturally as opt-in periphery.
 
 ---
 
@@ -214,7 +214,7 @@ Faster pacing shrinks $\mu$ but raises $s$; wider ranges lower $s$ per tick but 
 
 Short answer: **yes — a perp on this engine is a looped TrueLend loan, and the liquidation mechanism carries over unchanged.** What changes is vocabulary and one periphery contract.
 
-**The construction.** A leveraged long on ETH margined in USDC is, stripped of branding, *hold ETH, owe USDC* — which is a TrueLend position. Leverage comes from looping: deposit ETH, borrow USDC, buy ETH with it, add that to the collateral, repeat — and a small periphery "LeverageRouter" can do the whole loop atomically in one transaction. The result is a single hook position where exposure is the total ETH held, margin is what the trader actually funded, and leverage $= 1/(1-\mathrm{LTV})$: 94% LTV is ~17×, 98% is 50×. A short is the mirror image, in the direction the hook already supports.
+**The construction.** A leveraged long on ETH margined in USDC reduces to *hold ETH, owe USDC* — which is a TrueLend position. Leverage comes from looping: deposit ETH, borrow USDC, buy ETH with it, add that to the collateral, repeat — and a small periphery "LeverageRouter" can do the whole loop atomically in one transaction. The result is a single hook position where exposure is the total ETH held, margin is what the trader actually funded, and leverage $= 1/(1-\mathrm{LTV})$: 94% LTV is ~17×, 98% is 50×. A short is the mirror image, in the direction the hook already supports.
 
 **The dictionary.** Initial margin = $1-\mathrm{LTV}$ at open. **Maintenance margin = $1-\mathrm{LT}$** — an LT-99 position runs 1% maintenance margin. The bankruptcy price is the range's far edge, and the range interior becomes a *progressive auto-deleveraging zone*: losses realize gradually through the band instead of via one-shot ADL. The funding rate emerges with no funding oracle at all: long open interest borrows the USDC vault while short open interest borrows the ETH vault, so a skew in open interest becomes a skew in utilizations becomes a rate differential — funding discovered by the same kink curve that prices ordinary borrowing.
 
