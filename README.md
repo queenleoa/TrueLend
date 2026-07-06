@@ -1,50 +1,59 @@
-# TrueLend — Oracleless Lending on Uniswap v4
+# TrueLend — Lending-Borrowing Protocol with AMM Native Liquidations on Uniswap v4
 
-TrueLend is a lending protocol built as a Uniswap v4 hook. It uses **no price oracle**: the pool's own tick decides everything, and liquidation is not an event but a **process** — while the price sits inside a position's liquidation range, the hook sells the collateral in small, time-paced chunks into the pool; if the price recovers, the decay pauses. A penalty per chunk is donated to the pool's LPs, who replace keepers as the compensated absorbers of liquidation flow.
+🏆 This hook has been awarded first place in the Uniswap Hook Incubator cohort 7 Hookathon
 
-Because selling is rate-limited (≈1% of a position per minute, scaled by range depth and pool thinness), no liquidation can crater the price and cascade into the next one — and because the trigger is the pool's own tick, there is no oracle to lag, spoof, or de-list. That is what makes liquidation thresholds up to 99% possible on deep pools.
+## What this is, in plain terms
 
-🏆 First place, UHI hackathon (original concept & v1). This is v2: the same liquidation mechanism, made correct and complete.
+TrueLend lets people **lend** one token of a Uniswap pool to earn interest, and lets others **borrow** it by locking up the pool's *other* token as **collateral** (a security deposit the protocol can sell if the loan goes bad).
 
-- **[DESIGN.md](DESIGN.md)** — the full specification: a loan walked end-to-end, architecture, the chunk engine, parameters, build plan.
-- **[RESEARCH.md](RESEARCH.md)** — why chunked *active* conversion is the only AMM-native way to do this (passive "inverse range orders" are provably impossible on v4), prior art (LLAMMA, Ajna, Ammalgam, …), manipulation economics, and all the math.
+Two things make it different from Aave-style lending:
 
-## How it works
+1. **It has no price oracle.** Ordinary lending protocols rely on an external price feed to decide when a loan is undercollateralized — a feed that can lag, be manipulated, or simply not exist for a given token. TrueLend never asks anyone what the price is: the Uniswap pool it lives in *is* the price. The pool tracks price as a **tick** (a fine-grained step on a price ladder — each tick is a 0.01% price move), and the tick is the only trigger the protocol uses.
+2. **Liquidation is a process, not an event.** In other protocols, crossing the liquidation price means your entire position is seized at once by a bot ("keeper") for a bonus — and that forced sale pushes the price down, which liquidates the next borrower, and so on (a *cascade*). In TrueLend, each loan instead gets a **liquidation range**: a band of prices starting at the loan's liquidation threshold. While the pool price sits inside that band, the protocol sells the collateral in **small timed chunks** — about 1% of the position per minute — using each sale to pay down the debt. If the price recovers and leaves the band, the selling *pauses* and the borrower keeps everything that remains.
 
-```
-lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueLendHook ◄──open/repay── borrowers
-                                                            │
-                                        beforeSwap: manipulation-resistant oracle obs
-                                        afterSwap:  trigger-tick walk + ≤2 liquidation
-                                                    chunks (direct swap + donate)
-```
+Because the selling is rate-limited, no liquidation can crater the price and set off the next one. Because the trigger is the pool's own tick, there is nothing external to lag, spoof, or de-list. And because the process is gradual and reversible rather than all-or-nothing, borrowers can safely choose **liquidation thresholds up to 99%** — meaning they can borrow up to ~94% of their collateral's value, versus 50–80% elsewhere.
 
-1. **Open**: borrower deposits one pool currency as collateral, borrows the other from that side's vault. Collateral is valued at the *worse of* spot and a truncated median of the pool's own recent ticks (single-block price pumps don't raise borrow limits). The position gets a liquidation range starting at its LT price, ~√2 wide.
-2. **Decay**: when the pool tick is inside the range, each swap's `afterSwap` (or a permissionless `poke`) sells a paced chunk of collateral, donates a penalty to in-range LPs via `donate()`, and repays the vault. Price leaves the range → decay pauses; re-enters → resumes.
-3. **Backstop**: past the range end, past the term (180d), or health-breached, anyone may `forceClose` for a reward. Shortfalls hit vault reserves first, then socialize pro-rata — a declared waterfall, not an implicit one.
+The people who absorb the chunk sales are the pool's ordinary **liquidity providers (LPs)** — and each chunk pays them a small **penalty fee** for it. LPs replace keepers, and get paid for the role.
+
+## Where to read more
+
+| Document | What it covers |
+|---|---|
+| **[DESIGN.md](DESIGN.md)** | The specification: every concept defined in order (§0), one loan walked end-to-end with real numbers, the architecture, the liquidation engine internals, all parameters. **Start here.** |
+| **[RESEARCH.md](RESEARCH.md)** | The "why": a proof that no *passive* AMM mechanism can liquidate a loan (which is why every alternative either needs an oracle or a new AMM), lessons from every prior protocol, manipulation economics, and the math. |
+| **[WHITEPAPER.md](WHITEPAPER.md)** / [docs/TrueLend-Whitepaper.pdf](docs/TrueLend-Whitepaper.pdf) | The formal paper — same content, publication form. |
+| **[PARAMETERS.md](PARAMETERS.md)** | How the protocol's numeric parameters are derived: the risk model, formulas, and the simulation methodology. |
+
+## How a loan works (60-second version)
+
+1. **Lenders** deposit a token into that token's **vault** (a pooled deposit account, one per pool currency). Their deposits are what borrowers draw from; they earn interest that rises as more of the vault is borrowed ("utilization").
+2. A **borrower** deposits collateral and picks two numbers: how much to borrow (their **LTV**, loan-to-value — debt as a fraction of collateral value) and their **liquidation threshold** (**LT** — the LTV at which liquidation should begin). The protocol computes the price where the loan hits its LT and places the liquidation range there.
+3. Nothing happens while the price stays on the safe side — the loan costs the pool zero ongoing work.
+4. If trading pushes the tick into the range, each subsequent swap's hook callback (or a public `poke()` call) sells one paced chunk, pays the LP penalty, and repays debt. Price exits the range → pause. Debt fully repaid → position closes, remaining collateral returns to the borrower.
+5. If the price blows through the *entire* range, the term (180 days) expires, or interest erodes the position's health, anyone may call `forceClose` for a reward — a slippage-bounded final sale. Any shortfall is absorbed by vault reserves first, then shared pro-rata by lenders — an explicit, on-chain-recorded loss waterfall rather than an implicit one.
 
 ## Contracts
 
 | Contract | Role |
 |---|---|
-| [`TrueLendHook`](src/TrueLendHook.sol) | hook + lending core; one instance serves many pools — initializing any ERC20/ERC20 pool with this hook makes it a lending market |
-| [`LendingVault`](src/LendingVault.sol) | per-currency lender vault: shares, borrow index, kinked IRM (kink 80%, hard cap 90%), 10% reserve factor |
-| [`VaultFactory`](src/VaultFactory.sol) | deploys the two vaults per pool at initialization |
-| [`libraries/LiqRangeMath`](src/libraries/LiqRangeMath.sol) | decimals-safe Q96 liquidation-range placement, both borrow directions |
-| [`libraries/ChunkMath`](src/libraries/ChunkMath.sol) | the pacing formula (time × depth × pressure, clamped) |
-| [`libraries/TruncatedOracle`](src/libraries/TruncatedOracle.sol) | ±9,116-tick truncation, median-of-9, widen-only extremes, bootstrap gate |
-| [`libraries/TriggerIndex`](src/libraries/TriggerIndex.sol) | tick bitmap so `afterSwap` only touches positions whose boundaries were crossed |
+| [`TrueLendHook`](src/TrueLendHook.sol) | The core: hook callbacks + positions + the chunk liquidation engine. One deployment serves many pools; initializing any ERC20/ERC20 pool with this hook makes it a lending market. |
+| [`LendingVault`](src/LendingVault.sol) | Per-currency lender vault: deposit shares, a borrow index that accrues interest, utilization-based rates (kink at 80%, hard cap at 90%), 10% of interest kept as a first-loss reserve. |
+| [`VaultFactory`](src/VaultFactory.sol) | Deploys the two vaults for each new pool. |
+| [`libraries/LiqRangeMath`](src/libraries/LiqRangeMath.sol) | Computes where a loan's liquidation range sits, exactly, for any token-decimal pair and both borrow directions. |
+| [`libraries/ChunkMath`](src/libraries/ChunkMath.sol) | The pacing formula: how large the next chunk is (time × range-depth × pool-thinness, clamped). |
+| [`libraries/TruncatedOracle`](src/libraries/TruncatedOracle.sol) | The internal manipulation-resistant price used only at loan opening: per-minute observations with movement clamped, read as a median, plus widen-only extremes. |
+| [`libraries/TriggerIndex`](src/libraries/TriggerIndex.sol) | A tick bitmap so swaps only pay for positions whose range boundaries they actually crossed. |
 
 ## Build & test
 
 ```bash
 git clone --recursive <repo>
 forge build
-forge test          # 77 tests: unit + fuzz (libraries, vault), integration
-                    # scenarios (full liquidation lifecycle), invariants
+forge test    # 78 tests: fuzzed unit tests (math, oracle), vault accounting,
+              # 24 full-lifecycle scenarios, randomized invariants
 ```
 
-Test map: [`test/libraries/`](test/libraries/) (fuzzed math + oracle), [`test/LendingVault.t.sol`](test/LendingVault.t.sol) (IRM, accrual, write-off waterfall), [`test/TrueLendHook.t.sol`](test/TrueLendHook.t.sol) (open/repay/decay/pause/resume/forceClose, manipulation defense, 6-vs-18-decimals pair), [`test/TrueLendInvariants.t.sol`](test/TrueLendInvariants.t.sol) (conservation under random action sequences).
+Test map: [`test/libraries/`](test/libraries/) · [`test/LendingVault.t.sol`](test/LendingVault.t.sol) · [`test/TrueLendHook.t.sol`](test/TrueLendHook.t.sol) (open/decay/pause/resume/forceClose, manipulation rejection, drained-pool safety, 6-vs-18-decimals) · [`test/TrueLendInvariants.t.sol`](test/TrueLendInvariants.t.sol).
 
 ## Deploy
 
@@ -52,7 +61,7 @@ Test map: [`test/libraries/`](test/libraries/) (fuzzed math + oracle), [`test/Le
 POOL_MANAGER=0x... forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
-Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` flags via CREATE2, deploys, and prints addresses. Any pool then initialized with this hook is automatically a lending market (loans open only after the pool's 9-minute oracle window fills).
+Mines a hook address carrying the required permission flags, deploys hook + factory + linked libraries, and prints addresses. Any pool then initialized with this hook becomes a lending market (loans open only after its 9-minute oracle warm-up window fills).
 
 ## Deployments
 
@@ -64,4 +73,4 @@ Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` fla
 
 ## Status & roadmap
 
-Working v2 with full test coverage of the mechanism. Not audited. Next: the parameter-modeling notebook (chunk pacing constants, LT tiers vs pool depth, penalty curve — DESIGN.md §7 ★ rows), per-block borrow caps and aggregate tick-region exposure caps, and testnet deployment.
+Working v2 with full test coverage of the mechanism; deployed to testnet; **not audited**. Next: parameter modelling per [PARAMETERS.md](PARAMETERS.md), per-block borrow caps, aggregate tick-region exposure caps, audit.

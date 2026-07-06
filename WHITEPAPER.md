@@ -1,4 +1,4 @@
-# TrueLend: Oracle-Free Lending with AMM-Native Gradual Liquidation
+# TrueLend: Oracleless Lending with AMM-Native Gradual Liquidation
 
 **Version 2.0 · July 2026**
 
@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Collateralized lending in decentralized finance rests on two fragile pillars: external price oracles, which import latency and manipulation risk into every solvency decision, and binary liquidations, which convert individual insolvency into systemic cascades. TrueLend removes both. Built as a Uniswap v4 hook, it uses the pool's own tick as its only price signal, and replaces the liquidation *event* with a liquidation *process*: while the pool price sits inside a position's liquidation range, the position's collateral is sold into the pool in small, rate-limited chunks that repay its debt; when the price recovers, the process pauses. We show that this active, in-range execution is not one design choice among many but the **only** mechanism class available to an oracle-free lender on a constant-function market maker — passive liquidity is mathematically incapable of performing a liquidation — and we present the complete protocol built around it: per-pool lender vaults with utilization-priced interest, a manipulation-resistant internal price for the single moment one is needed, a layered solvency framework with a declared loss waterfall, and strict per-swap gas bounds. Because liquidation is gradual, reversible, and executed at the pool's own prices, borrowers can safely select liquidation thresholds as high as 99%. The protocol is implemented, tested (78 tests including randomized invariants), and deployed on Unichain Sepolia.
+Overcollateralized lending in decentralized finance rests on two fragile pillars: external price oracles, which import latency and manipulation risk into every solvency decision, and binary liquidations, which convert individual insolvency into systemic cascades. TrueLend removes both. Built as a Uniswap v4 hook, it uses the pool's own tick as its only price signal, and replaces the liquidation *event* with a liquidation *process*: while the pool price sits inside a position's liquidation range, the position's collateral is sold into the pool in small, rate-limited chunks that repay its debt; when the price recovers, the process pauses. We show that this active, in-range execution is not one design choice among many but the **only** mechanism class available to an oracle-free lender on a constant-function market maker — passive liquidity is mathematically incapable of performing a liquidation — and we present the complete protocol built around it: per-pool lender vaults with utilization-priced interest, a manipulation-resistant internal price for the single moment one is needed, a layered solvency framework with a declared loss waterfall, and strict per-swap gas bounds. Because liquidation is gradual, reversible, and executed at the pool's own prices, borrowers can safely select liquidation thresholds as high as 99%. The protocol is implemented, tested (78 tests including randomized invariants), and deployed on Unichain Sepolia.
 
 ---
 
@@ -33,15 +33,15 @@ TrueLend is a redesign of both halves at once, made possible by Uniswap v4's hoo
 
 ## 2. Preliminaries: Uniswap v4 in four facts
 
-We assume familiarity with constant-function market makers and summarize only what the construction uses.
+Four facts about the venue carry the whole construction. Readers fluent in v4 can skim; nothing else about the AMM is assumed.
 
-**Price and ticks.** A v4 pool between `token0` and `token1` quotes a price $P$ = token1 per token0, stored as $\sqrt{P}$ in Q96 fixed point. Price is discretized into **ticks**: $P = 1.0001^{t}$. Rising tick means token0 appreciating.
+First, prices and ticks. A pool between `token0` and `token1` quotes one price — how much token1 a unit of token0 buys — and tracks it on a logarithmic grid of **ticks**, $P = 1.0001^t$, so a move of a hundred ticks is very nearly a one-percent move. A rising tick means token0 appreciating.
 
-**Concentrated liquidity.** A liquidity position $(L, [t_a, t_b])$ provides depth only inside its range. Its token composition is a deterministic function of the current price (§3.1). Swaps consume in-range liquidity and move the tick.
+Second, liquidity is *concentrated*: each provider chooses a price range, and their capital trades (and earns fees) only while the current price is inside it. Consequently a liquidity position's composition — how much of it currently sits in token0 versus token1 — is a deterministic function of the current price alone. Section 3 leans entirely on this fact.
 
-**Hooks.** A pool may designate a hook contract whose callbacks run before/after initialization, swaps, and liquidity changes. Hook permissions are encoded in the hook's address bits. During a swap callback the PoolManager is already unlocked, so a hook may itself call `swap` or `donate` directly; hook-initiated calls do not re-trigger the hook's own callbacks (`noSelfCall`).
+Third, a pool may name a **hook**: a contract the pool calls before and after every swap and at initialization, with its permissions encoded in its address. Two properties matter here: during a swap callback the pool's manager is already unlocked, so the hook itself may execute swaps or donations *directly*; and hook-initiated calls do not re-trigger the hook's own callbacks, so doing this is recursion-safe.
 
-**Donation.** `donate()` credits value to currently in-range liquidity providers — a native mechanism for paying LPs a fee stream.
+Fourth, v4 provides `donate()`: a native way to credit value to exactly the liquidity providers currently in range. This is the payment rail TrueLend uses for its liquidation penalties.
 
 ---
 
@@ -184,7 +184,7 @@ stateDiagram-v2
 
 Each pool initialized with the hook automatically receives two **LendingVaults**, one per currency; either side is borrowable with the other as collateral. Lenders are strictly passive: deposit, receive shares, earn.
 
-**Accounting.** Debt is tracked as shares against a per-vault borrow index $I$ accruing linearly at the utilization-priced rate $r$: over $\Delta t$, $I \mathrel{+}= I \cdot r\,\Delta t / \text{year}$, with $\text{debt}(s) = s \cdot I$. Lender shares price against total assets = cash + outstanding debt (reserves excluded), with virtual-offset conversion against inflation attacks. Rounding always favors the vault.
+**Accounting.** Interest needs no per-position bookkeeping. Each vault maintains a single *borrow index* — a number that starts at one and grows continuously at the current rate — and a position's debt is simply its debt-share count multiplied by the index. Lender shares, in turn, price against the vault's total assets (cash plus outstanding debt, reserves excluded), with a virtual-offset conversion that blunts share-inflation attacks; every rounding decision favors the vault.
 
 **Rates.** A kinked utilization curve: $r(U) = 4\%\cdot U/80\%$ up to the kink at $U^* = 80\%$, then $+100\%$ slope above it, with a **hard borrow cap at $U = 90\%$**. The cap is load-bearing rather than cosmetic: chunk repayments settle through the vault and lender withdrawals must always clear, so free liquidity is an invariant, not a preference. Ten percent of all interest accrues to a per-vault **reserve** — the first tranche of the loss waterfall (§5).
 

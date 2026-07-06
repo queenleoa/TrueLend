@@ -1,322 +1,223 @@
-# TrueLend v2 — Research Report
+# TrueLend — Research Report
 
-This report is the background for [DESIGN.md](DESIGN.md). It answers four questions, in order:
+This report is the background for [DESIGN.md](DESIGN.md): the reasoning that selected TrueLend's mechanism over every alternative. It is organized as one argument, built in order. First we ask whether an AMM can liquidate a loan *by itself*, with no outside help — and prove that it cannot (§1). That impossibility sorts every existing protocol into exactly four families, which gives us a map of the design space (§2) and a reading list: what each prior protocol did about the same obstacle, and what it teaches (§3). We then examine what an oracle-free protocol actually has to defend against (§4), record for posterity an alternative architecture that was evaluated and rejected during this redesign (§5), and close with the mathematics the implementation stands on (§6) and an appendix on extending the same engine to perpetuals.
 
-1. **Can a Uniswap pool liquidate a loan by itself, passively?** No — and the proof of that "no" organizes the entire design space (§1–2).
-2. **What have other protocols done about it, and what do they teach?** (§3)
-3. **What does an oracle-free protocol actually have to defend against?** (§4)
-4. **What math does the implementation stand on?** (§6)
-
-Section 5 documents an alternative architecture that was evaluated and rejected during this redesign, so the reasoning isn't lost.
-
-> **Implementation status**: the design specified here is built and tested — see [DESIGN.md §8](DESIGN.md) for the as-built status, invariants, and security posture. One check evolved during the build: the open-time constraint is initial LTV ≤ 95% of the chosen LT at the worse-of price (a *guaranteed* full-traversal coverage requirement is mathematically incompatible with LT > ~70%, per §6.5 — that tail is instead carried by the health backstop and the declared waterfall, which is the product working as intended).
+Vocabulary follows [DESIGN.md](DESIGN.md), which defines every protocol term as it introduces it; research-side terms (arbitrageur, TWAP, first-passage, and so on) are defined here at first use.
 
 ---
 
 ## 1. The central question: can the AMM liquidate passively?
 
-The most elegant version of AMM-native lending would be: park the borrower's collateral in the pool as a liquidity position spanning the liquidation zone, and let ordinary trading convert it into the debt asset as the price moves against the loan. No keeper, no executor, no gas — the market itself performs the liquidation.
+Imagine the most elegant version of AMM-native lending anyone could propose. The borrower's collateral is not held in escrow by a contract — it is deposited *into the pool itself*, as liquidity spanning the prices where the loan would be in trouble. If the price deteriorates, ordinary trading converts the collateral into the debt token automatically, piece by piece, with no keeper, no executor, and no gas spent by anyone. If the price recovers, trading converts it back. The pool liquidates the loan, and un-liquidates it, by itself.
 
-This idea has a name — Instadapp called it an **inverse range order** — and it does not work. Understanding *why* it can't work takes one page and pays for itself: it explains what LLAMMA's oracle is really for, why LIKWID rebuilt the curve, and why TrueLend's chunk engine is not a workaround but the correct mechanism.
+This idea is so natural that it has been independently proposed more than once — Instadapp named it the **inverse range order** in 2023 — and it was the first thing tried in TrueLend's own hackathon build. It does not work, and cannot be made to work. Understanding exactly why is the most valuable page in this report, because the impossibility is what forces every design that follows.
 
-### 1.1 What a liquidity position does as price moves
+### 1.1 What a liquidity position does as the price moves
 
-A Uniswap position with liquidity `L` over price range `[P_a, P_b]` holds a mix of the two tokens that depends **only on the current price** (prices quoted as token1 per token0):
+A Uniswap position is a deposit of tokens spread across a chosen price range. Which token the position holds at any moment is not up to its owner — it is a mechanical function of where the current price sits. For a position with liquidity $L$ over the range $[P_a, P_b]$ (prices quoted as token1 per token0):
 
-| Where price is | Position holds |
-|---|---|
-| below `P_a` | 100% token0 |
-| above `P_b` | 100% token1 |
-| inside | a mix that shifts continuously between the two |
+$$
+\text{amount}_0 = L\left(\frac{1}{\sqrt{P}} - \frac{1}{\sqrt{P_b}}\right), \qquad
+\text{amount}_1 = L\left(\sqrt{P} - \sqrt{P_a}\right), \qquad P \in [P_a, P_b],
+$$
 
-Follow one traversal. Price **rises** through the range. Rising price means swappers are *buying token0* from the pool — and what they buy comes out of in-range positions. So as price rises, a position **sells token0 and accumulates token1**. Symmetrically, as price falls, a position **buys token0 with its token1**.
+with the position holding 100% token0 below the range and 100% token1 above it.
 
-That is the whole story, and it is one-directional in a specific sense: **passive liquidity always trades *against* the price move.** It sells what's getting expensive and buys what's getting cheap. As an order type, a range position gives you exactly two things:
+Now follow one price traversal and ask who is trading with whom. When the price *rises*, it rises because swappers are buying token0 from the pool — and what they buy comes out of the in-range positions. So as the price rises, every position is **selling token0**. Symmetrically, as the price falls, every position is **buying token0**. This is not a design choice that could have gone another way; it is what "providing liquidity" means. Passive liquidity is structurally the counterparty to every trade, which makes it structurally the *mean-reversion* side of every move: it sells what is getting expensive and buys what is getting cheap.
 
-- a **take-profit** (sell my token0 as it appreciates through the band), or
-- a **buy-limit** (buy token0 with my token1 as it dips through the band).
+As an order type, then, a liquidity position offers its owner exactly two services. Deposit token0 above the current price, and it will be sold off as the price rises through the range — a **take-profit**. Deposit token1 below the current price, and it will buy token0 as the price dips — a **buy-limit**. Uniswap's own documentation draws the boundary explicitly: an LP position *cannot* function as a stop-loss — it cannot sell into a falling market, and it cannot buy into a rising one.
 
-Uniswap's own documentation draws the line explicitly: *"you cannot use a Uniswap v3 LP position as a stop loss to sell into a falling market, and you can't use it to acquire an asset on its upside"* ([Range Orders — Uniswap docs](https://docs.uniswap.org/concepts/protocol/range-orders), [support article](https://support.uniswap.org/hc/en-us/articles/20980601560717-What-is-a-range-order), [Loesch](https://medium.com/@odtorson/how-to-use-uniswap-v3-as-a-limit-order-machine-a529cf369dd)).
+### 1.2 Liquidation is precisely the forbidden trade
 
-### 1.2 Liquidation is the trade passive liquidity can't make
+What does liquidating a loan require? Write it down for both possible configurations of an ETH/USDC market, and the problem appears immediately:
 
-Now write down what liquidating a loan requires, in both possible configurations of an ETH/USDC market:
+| Collateral | Debt | The loan sours when… | Liquidation must… | Passive liquidity instead… |
+|---|---|---|---|---|
+| ETH | USDC | ETH **falls** | **sell ETH as it falls** | *buys* ETH as it falls ✗ |
+| USDC | ETH | ETH **rises** (the debt appreciates) | **buy ETH as it rises** | *sells* ETH as it rises ✗ |
 
-**Case A — collateral ETH, debt USDC.** The loan sours when **ETH falls**. Liquidation must **sell ETH as it falls** to recover USDC. But as ETH falls, passive positions do the opposite: they *buy* ETH. To place ETH in a band below spot hoping it converts to USDC on the way down is precisely the stop-loss the docs say doesn't exist — worse, it can't even be minted: a band below spot only accepts token1 (USDC), not the ETH you'd want to sell.
-
-**Case B — collateral USDC, debt ETH.** The loan sours when **ETH rises** (the debt gets more expensive). Liquidation must **buy ETH as it rises** with the USDC collateral. As ETH rises, passive positions *sell* ETH — again the opposite side — and a band above spot only accepts token0 (ETH), not the USDC you'd want to convert.
-
-```mermaid
-flowchart LR
-    subgraph P["Passive liquidity (only two order types)"]
-        p1["price ↑ → sells token0<br/>= take-profit"]
-        p2["price ↓ → buys token0<br/>= buy-limit"]
-    end
-    subgraph L["Liquidation (both cases)"]
-        l1["debt asset ↑ → must BUY it<br/>= buy-stop ✗"]
-        l2["collateral ↓ → must SELL it<br/>= stop-loss ✗"]
-    end
-```
-
-Liquidation is always a **stop order** — it trades *with* the price move. Passive AMM liquidity is always the **limit side** — it trades against the move. The two never overlap, in either borrow direction. This is not an engineering limitation of v4; it is what a constant-function market maker *is*.
+Liquidation is always a **stop order**: it must trade *with* the direction of the move, selling collateral into weakness or buying the debt asset into strength. In both configurations that is exactly the trade passive liquidity cannot make. The mismatch is even physical: the position that would help cannot be *minted*, because a single-sided deposit below the current price only accepts token1, and above it only token0 — the wrong token on the relevant side, in both cases.
 
 ### 1.3 The impossibility, stated once
 
-> An AMM position can only be counter-momentum **with respect to the pool's own price**. To supply momentum-side flow — to sell what's falling or buy what's rising — someone must either (a) *tell* the pool that the market moved, which is an oracle, or (b) *execute* the trade, which is an agent: a keeper, or a hook.
->
-> Therefore: **oracle-free passive liquidation cannot exist.** Oracle-free liquidation must be *active*. The design freedom is only in *how* the active execution is shaped — and TrueLend shapes it as rate-limited, pausable, in-range chunks.
+> An AMM position can only trade counter to the movement of the pool's own price. To supply flow *with* the movement — to sell what is falling or buy what is rising — someone must either (a) tell the pool that the outside market has moved, which is an **oracle**, or (b) execute the trade as an agent: a keeper, or a hook. **Oracle-free passive liquidation therefore cannot exist.** An oracle-free liquidation must be *active* — the only freedom is in how gently the activity is shaped.
 
-### 1.4 What Instadapp's "inverse range order" actually was
+TrueLend shapes it as rate-limited, pausable, in-range chunks. But before designing that, it is worth seeing what everyone else did when they hit this same wall.
 
-The [Instadapp post](https://blog.instadapp.io/oracleless-lending-protocol-on-uniswap-v4/) (mid-2023) proposed the passive version anyway, by inventing a new primitive: the inverse range order is described as *"similar to a **negative position**, matching a user's LP positions with an inverse order"* that *"acts as a sort of 'reserve'"* — for a loan against ETH, *"an inverse range order of ETH is created on the USDC side of liquidity."*
+### 1.4 What the "inverse range order" actually proposed — and why v4 can't express it
 
-"Negative position" is the tell. The construct needs a position that *consumes* the conversion other LPs would undergo — negative liquidity — and no such primitive exists in v4: position liquidity is non-negative, in-range liquidity backs real reserves, and no hook flag lets one position absorb another's fills. The post's own phrasing ("with Uniswap's introduction of inverse range orders") anticipated a Uniswap feature that never shipped. Nothing was ever built. This matches TrueLend's own hackathon experience of attempting it against real v4 and finding no way through.
+Instadapp's 2023 post proposed the passive version anyway, by imagining a new primitive. Their inverse range order is described as "similar to a **negative position**, matching a user's LP positions with an inverse order" that "acts as a sort of *reserve*" — for a loan against ETH, "an inverse range order of ETH is created on the USDC side of liquidity."
 
-What a v4 hook *can* do instead — the only two honest translations:
+"Negative position" is the tell. The construct requires a position that *absorbs* the conversion other LPs would undergo — negative liquidity — and no such primitive exists in Uniswap v4: position liquidity is non-negative, in-range liquidity backs real reserves, and no hook capability lets one position soak up another's fills. The post's own phrasing ("with Uniswap's introduction of inverse range orders") anticipated a Uniswap feature that never shipped, and nothing was ever built. This matches TrueLend's hackathon experience of attempting the construction against real v4 and finding no way through.
 
-1. **Piggyback via custom accounting** (`beforeSwapReturnDelta`): inject the borrower's collateral sale into other people's swaps as they push the price toward the liquidation zone. Feasible, but every swapper crossing that zone gets worse execution (routers will notice and route around the pool), the fills are unpaced, and economically it is still active selling — just hidden inside someone else's trade. It also violates a v1 design commitment: *the user's swap proceeds unaffected*.
-2. **Execute in `afterSwap`**: after a swap settles, the hook sells a bounded chunk of collateral against the pool's in-range liquidity. The LPs are the counterparty — exactly the "reserve" role Instadapp assigned them — and TrueLend pays them the penalty for it via `donate()`, which is Instadapp's "penalty rate to LPs" built from a primitive that exists.
+There are exactly two honest ways a v4 hook can *approximate* the idea, and examining them shows why the second is TrueLend:
 
-Option 2 is TrueLend's chunk engine. The lineage is worth stating plainly: **inverse range orders (unimplementable) → their only sound v4 realization is rate-limited hook-executed conversion with LP compensation → which is the hackathon design.**
+1. **Piggyback on other people's swaps** (custom accounting): whenever a swap pushes the price toward a liquidation zone, the hook injects extra sell-flow of the borrower's collateral into that swap. Feasible — but every swapper crossing the zone gets worse execution than they quoted (routers would learn to avoid the pool), the fills follow no pacing, and economically it is still active selling, merely hidden inside someone else's trade.
+2. **Execute after other people's swaps**: once a swap settles, the hook sells a small, bounded chunk of collateral against the pool's liquidity, in the same transaction, leaving the swapper's own execution untouched. The LPs are the counterparty — exactly the "reserve" role Instadapp assigned them — and TrueLend pays them a penalty for it via v4's native `donate()`, which is Instadapp's "penalty rate to LPs" built from a primitive that actually exists.
+
+The lineage is worth stating plainly: *inverse range orders (unimplementable) → their only sound v4 realization is rate-limited hook-executed conversion with LP compensation → which is TrueLend's chunk engine.*
 
 ---
 
-## 2. The design space that impossibility creates
+## 2. The design space the impossibility creates
 
-Every gradual-liquidation protocol must answer §1.3 somehow. There are exactly three answers on the table, plus a family that dodges the question:
+Every gradual-liquidation protocol in production or proposal is one answer to §1.3. There are four:
 
-| Answer | How it manufactures the stop-side trade | Who does it | Cost |
+| Answer | How the stop-side flow gets made | Example | What it costs |
 |---|---|---|---|
-| **Import direction from an oracle** | quote worse-than-market prices around the oracle so arbitrageurs profitably perform the conversion | Curve LLAMMA | oracle dependency; borrower pays the arb subsidy |
-| **Rebuild the curve** | virtual/mirror reserves make the pool itself track debt; liquidation conditions come from reserve state | LIKWID, Ammalgam | non-canonical pools; whole-new-AMM risk surface |
-| **Execute, rate-limited** | a hook sells bounded chunks against in-range LPs, paying them a penalty | **TrueLend** | execution is active (gas, pacing design); solvency is probabilistic within a modeled buffer |
-| *Avoid liquidation entirely* | maturities/options (Timeswap), worst-case collateral (InfinityPools), auctions (Ajna) | — | capital inefficiency or keeper games |
+| **Import direction from an oracle** | quote deliberately worse-than-market prices around the feed, so profit-seeking **arbitrageurs** (traders who correct price gaps between venues) perform the conversion | Curve LLAMMA | the oracle dependency; the borrower pays the arbitrage subsidy |
+| **Rebuild the AMM's curve** | add virtual "borrowed" reserves to the invariant so the pool's own state tracks debt | LIKWID, Ammalgam | non-canonical pools; an entirely new AMM risk surface |
+| **Execute actively, rate-limited** | a hook sells bounded chunks against in-range liquidity | **TrueLend** | execution is active; solvency is a modeled buffer rather than a closed form |
+| **Avoid liquidation entirely** | fixed maturities, worst-case collateralization, or auctions | Timeswap, InfinityPools, Ajna | capital inefficiency, or keeper games reappear elsewhere |
 
 ```mermaid
 flowchart TB
     Q["§1.3: stop-side flow must come from somewhere"]
-    Q --> O["Oracle-assisted arb<br/><b>LLAMMA</b> — gradual+reversible, needs a feed"]
-    Q --> C["Curve surgery<br/><b>LIKWID / Ammalgam</b> — pool state is the ledger"]
+    Q --> O["Oracle-assisted arbitrage<br/><b>LLAMMA</b> — gradual + reversible, needs a feed"]
+    Q --> C["Curve surgery<br/><b>LIKWID · Ammalgam</b> — pool state is the ledger"]
     Q --> E["Active, rate-limited execution<br/><b>TrueLend</b> — canonical v4 pools, no oracle"]
     Q --> A["Sidestep: no liquidation<br/><b>Timeswap · InfinityPools</b> · (Ajna: auctions)"]
-    I["Instadapp 'inverse range orders'<br/>passive — impossible (§1)"] -. only feasible form .-> E
+    I["Instadapp inverse range orders<br/>passive — impossible (§1)"] -. only feasible form .-> E
 ```
 
-TrueLend's cell — *gradual, reversible-by-pause, oracle-free, on unmodified v4 pools* — is empty in the market today. That is the pitch, now with the feasibility argument to back it.
+TrueLend's cell — gradual, reversible-by-pause, oracle-free, on unmodified Uniswap pools — was empty before this protocol. The next section walks the other cells, because nearly every defensive mechanism TrueLend uses was learned from someone in them.
 
 ---
 
-## 3. Prior art, by what it teaches
+## 3. Prior art, organized by what it teaches
 
 ### 3.1 Curve LLAMMA — the oracle-assisted cousin, and the benchmark for "gradual"
 
-([whitepaper](https://resources.curve.finance/pdf/curve-stablecoin.pdf) · [explainer](https://docs.curve.finance/developer/crvusd/llamma-explainer) · [soft-liquidation docs](https://resources.curve.finance/crvusd/advanced-liquidation/))
+LLAMMA, the liquidation engine behind Curve's crvUSD, is the only gradual liquidation system with years of production history, and it is TrueLend's closest relative: the same goals, the opposite answer to §1.3.
 
-LLAMMA (crvUSD's liquidation AMM) is the only battle-tested gradual liquidation system, and it is TrueLend's closest relative — same goals, opposite answer to §1.3.
+Its collateral sits in a stack of narrow price bands (about 1% wide each). As the price falls through a band, that band's collateral converts to crvUSD; if the price recovers, it converts back — Curve calls these "soft liquidation" and "de-liquidation," and they are precisely the reversibility TrueLend also wants. But the conversion is not performed by organic trading. LLAMMA's internal quote is a function of an external oracle price, engineered to *over-react* to it: when the oracle falls, LLAMMA briefly becomes the worst-priced venue in the market, and arbitrageurs profit by doing the converting. That is §1.3 option (a) in its purest form — the oracle manufactures the stop-side flow, and the arbitrageurs' profit is the borrower's cost. Curve's own numbers put that cost around 1% of collateral for a 10%-below-threshold excursion held three days, growing with volatility, since every band the price re-crosses pays the spread twice.
 
-**How it works.** Collateral is spread across 4–50 adjacent ~1%-wide price bands. As price falls through a band, that band's collateral converts to crvUSD; if price recovers, it converts back ("soft liquidation" and "de-liquidation" — the reversibility TrueLend also wants). The conversion is driven by an external EMA oracle: LLAMMA quotes prices that *over-react* to the oracle (internal price moves ~cubically versus it), so whenever the oracle moves, LLAMMA is briefly the worst-priced venue in the market and **arbitrageurs are paid to do the converting**. That is the oracle manufacturing the stop-side flow — a working instance of §1.3(a).
+What LLAMMA proves and warns: gradual, reversible liquidation is *proven user experience* at billion-dollar scale — borrowers demonstrably accept a small continuous cost to escape the guillotine. Finer steps mean smaller per-episode losses (TrueLend's analogue of band count is its chunk pacing). And most soberingly: **even with an oracle actively forcing conversion, price gaps still outran it** — a 2025 LlamaLend market took ~$700K of bad debt when the market moved faster than rebalancing. The lesson TrueLend takes verbatim is that a gradual mechanism must carry a hard backstop behind it, and its loss path must be explicit.
 
-**What it costs.** The arb subsidy comes out of the borrower: ~1% of collateral for a 10%-below-threshold excursion held 3 days (whitepaper simulation); 1–2% per episode empirically; losses compound with volatility since every band round-trip pays the spread twice.
+### 3.2 The curve-surgery family — LIKWID, Ammalgam, GammaSwap
 
-**What it proves and warns.**
-- Gradual + reversible liquidation is *proven UX* at billion-dollar scale — borrowers accept small continuous costs to escape binary liquidation.
-- Finer steps → smaller per-episode loss. TrueLend's analogue of band count is chunk pacing.
-- **Even with an oracle actively forcing conversion, gap-through happens**: the Oct 2025 CRV LlamaLend market ate ~$700K of bad debt when price outran rebalancing ([post-mortem](https://gov.curve.finance/t/llamalend-sdola-long2-post-mortem/11020) covers the earlier sDOLA case). A hard backstop behind the soft mechanism is therefore non-negotiable — hence TrueLend's `forceClose`.
-- Model losses against **realized variance**, not price level: choppy sideways markets bleed soft-liquidation positions that never "really" fell.
+These protocols avoid the oracle by rebuilding the market itself, so that the pool's own state *is* the risk ledger.
 
-### 3.2 The curve-surgery branch — LIKWID, Ammalgam, GammaSwap
+**LIKWID** replaces the constant-product invariant with $(x + x')(y + y') = k$, where the primed values are borrowed "mirror" reserves: price, borrow limits, and liquidation conditions all derive from (time-smoothed) reserve state, and liquidating positions pay a continuous penalty to LPs. It began as a Uniswap-Foundation-granted v4 hook team and ended up building its own AMM on another chain — a measure of how far from canonical pools this route pulls.
 
-These protocols avoid the oracle by making the pool's own state the risk ledger. They validate oracle-free lending economics; their techniques transfer even though TrueLend keeps the canonical curve.
+**Ammalgam** merges a DEX and a lender into one pair contract, and contributes the best *defensive toolkit* in the space, four pieces of which TrueLend adopts at origination. Solvency prices are treated as a **range, not a point** — the worse (for the borrower) of spot, a ~50-block average, and a ~week average. Per-interval price *extremes* are recorded and can only ever **widen** the risk bounds, so a spike-and-revert still counts against the next borrower. New pools are **gated** from borrowing until their price history fills. And maximum leverage is tied to the pool's own depth, with aggregate (not merely per-position) exposure caps, so the cap cannot be dodged by splitting a position across addresses. Ammalgam also arrives independently at a principle TrueLend shares: liquidation triggers should carry **no atomic bonus** for the trigger-puller, so that a manipulated trigger farms nothing.
 
-**LIKWID** ([docs](https://docs.likwid.fi/)) replaces `xy=k` with `(x+x′)(y+y′)=k`, where the primed values are borrowed "mirror" reserves. Price, borrow caps, and liquidation conditions all derive from (time-smoothed) reserve state; liquidating positions pay a continuous penalty to LPs. Started as a Uniswap-Foundation-granted v4 hook team, later moved to its own AMM on Monad — evidence of how far from canonical v4 this route pulls.
+**GammaSwap** lends LP tokens and measures *both* debt and collateral in units of the pool invariant $\sqrt{xy}$ — a quantity no swap can change (fees only increase it). Solvency becomes immune to price manipulation, and there is no liquidation price at all, only a "time to liquidation" driven by interest. The trick needs positions that are naturally balanced 50:50, so it cannot transfer to token-vs-token debt directly — but its spirit survives in TrueLend as the observation that *the liquidation trigger itself needs no valuation* (a tick crossing is a fact, not an estimate), leaving origination as the only moment to armor.
 
-**Ammalgam** ([docs](https://docs.ammalgam.xyz)) is a DEX+lender in one pair, and contributes the best *defensive toolkit* in the space:
-- Solvency prices are a **range, not a point**: min/max over {spot, ~50-block geometric mean, ~1-week geometric mean}, always using the bound *against* the borrower at open and *for* the borrower at liquidation.
-- **Widen-only extremes**: per-interval min/max ticks that can only widen the risk range — a spike-and-revert inside one interval still counts against the next borrower.
-- **Bootstrap gating**: no borrows until all price windows have filled after pool creation.
-- **Depth-tied leverage**: debt is grossed up by the slippage of unwinding it against the pool's own liquidity (`D_in = ceil(L·D/(L−D))`), making "manipulate, borrow, exit" self-defeating; plus saturation tranches so the cap can't be dodged by splitting positions across addresses.
-- **Zero-bonus liquidation gradient**: eligibility begins *before* the threshold with zero liquidator bonus, growing smoothly after — so a manipulated trigger hands the attacker nothing.
+### 3.3 The sidestep family — no liquidation at all
 
-TrueLend adopts all five (DESIGN.md §6; the last one arrives naturally since chunk liquidation has no atomic bonus at all).
+**Timeswap** gives loans a fixed strike and a fixed maturity; a borrower who walks away simply forfeits the collateral, so lending is knowingly selling a put option, priced by the pool with no oracle anywhere. Its lesson for TrueLend is the **term**: a maturity converts unbounded tail risk into bounded, priceable risk — which is exactly why TrueLend loans expire, since interest is the one force that erodes a position without the price moving. Its cost — liquidity fragmented across every strike-and-maturity pair — is why TrueLend uses one term per pool rather than bespoke terms per loan.
 
-**GammaSwap** ([docs](https://docs.gammaswap.com)) lends LP tokens and measures *both* debt and collateral in invariant units `√(x·y)` — which swaps cannot change (fees only raise K). Solvency becomes first-order immune to price manipulation, and there is no liquidation price at all, only a "time to liquidation" driven by interest. Lesson: denominate in invariant units wherever a quantity is naturally 50:50 (not TrueLend's case — token-vs-token debt needs a price at origination — but the *aspiration* explains why liquidation-by-tick-crossing, which needs no valuation, is the manipulation-resistant part of TrueLend, and origination, which needs one, is the part to armor). Also from GammaSwap: cap borrow rates, and make origination fees climb steeply past ~80% utilization.
+**InfinityPools** lets traders borrow LP *positions* themselves; because a range's composition at every possible price is known in advance, requiring collateral equal to the worst case makes the loan safe everywhere, with no oracle and no liquidation. Two takeaways: closed-form worst-case range math (TrueLend uses the same forms to size its backstop sales), and a market warning — the protocol's elegance did not create liquidity, and its TVL stayed negligible. Mechanism design does not substitute for a passive-capital experience, which is why TrueLend keeps lenders strictly passive.
 
-### 3.3 The sidestep branch — no liquidation at all
+**Ajna** is oracle-free but not liquidation-free: lenders deposit at the highest collateral price they will accept, solvency compares debt against the marginal lender's price, and liquidation runs as a bonded auction where a wrongful trigger loses its bond. TrueLend adopts its economics of friction — an **origination fee** as a manipulation tax and a **minimum position size** (dust breaks every averaging defense an oracle-free system leans on) — and treats its adoption history as the same warning InfinityPools gives: forcing lenders to actively manage prices caps growth.
 
-**Timeswap** ([whitepaper](https://timeswap.io/whitepaper.pdf)): fixed-strike, fixed-maturity pools; a defaulting borrower simply forfeits collateral, so lending is knowingly selling a put; a three-variable AMM discovers the interest rate with no oracle. Lesson TrueLend takes: **maturities convert unbounded tail risk into bounded, priceable risk.** Interest is the one force that erodes a position without price moving — a term plus an interest-reserve check bounds it cleanly (DESIGN.md §5). Timeswap's cost — liquidity fragmented across every (strike, maturity) pair — is why TrueLend uses one term ladder per pool, not bespoke terms per position.
+**Panoptic** (perpetual options built from Uniswap liquidity) contributes one specific tool: it checks solvency not at spot but at a **median over a ring of the pool's own recent ticks**, maintained by the protocol itself — essential on v4, where pools have no built-in oracle. TrueLend's price filter is this pattern plus Uniswap's truncation research. Panoptic also orders its loss-sharing so accrued *yield* is haircut before anyone's principal — the shape TrueLend's waterfall follows (reserves, which are accumulated interest, absorb losses before lender principal).
 
-**InfinityPools** ([docs](https://docs.infinitypools.finance/protocol-overview/introduction)): traders borrow LP ranges themselves; because a range's composition at every possible price is known in advance, requiring collateral equal to the worst case makes the loan safe at all prices — no oracle, no liquidation, leverage ≈ price/(price − strike). Two takeaways: range math yields price-independent worst-case bounds (TrueLend uses the same closed forms to size `forceClose`), and — from its ~$140K TVL — **mechanism elegance does not create liquidity; passive-capital UX does.** TrueLend keeps lenders strictly passive for this reason.
+### 3.4 Everything adopted, in one paragraph
 
-**Ajna** ([whitepaper](https://www.ajna.finance/pdf/Ajna_Protocol_Whitepaper_01-11-2024.pdf)) is oracle-free but not liquidation-free: lenders deposit at the highest collateral price they'll accept (7,388 buckets), solvency compares debt to the marginal lender's price, and liquidation is a bonded kick plus 72-hour Dutch auction where wrong kicks lose their bond. Adopted from Ajna: the **origination fee as a manipulation tax** (max of one week's interest, 5 bps), **minimum position sizes** (dust breaks every averaging trick an oracle-free system relies on), and the adoption warning that mirrors InfinityPools': forcing lenders to manage price placement caps growth. Its bad-debt rule — most optimistic lenders eat losses first — is principled but inapplicable where lenders don't express prices; TrueLend's waterfall (reserve → interest haircut → principal haircut) borrows instead from Panoptic's yield-before-principal ordering.
-
-**Panoptic** (perps-style options from Uniswap liquidity; [paper](https://arxiv.org/abs/2204.14232), [liquidations](https://panoptic.xyz/docs/panoptic-protocol/liquidations)) contributes the **internal-median defense**: solvency is never checked at raw spot but at a median over a ring buffer of the pool's own recent ticks that the protocol maintains itself — essential on v4, where pools have no built-in oracle. TrueLend's `TruncatedOracle` is this pattern plus Uniswap's truncation. Also: cap liquidation bonuses (kills manipulate-for-bonus), and haircut counterparties' *yield* before principal.
-
-### 3.4 Adjacent but not on-point
-
-**Numoen** (bespoke-CFMM power perps, oracle-free, dead — elegance ≠ adoption). **Particle / Marginal / Itos**: the borrow-the-LP branch; Marginal depends on a v3 TWAP. **Bunni v2's am-AMM**: state of the art on recapturing LVR/MEV for LPs — relevant someday if TrueLend pools attract toxic-flow problems, not to the lending design. **Hookathon/UHI lending hooks** (e.g. Milady Bank): conventional oracle-or-keeper designs; none do gradual in-band conversion.
-
-### 3.5 Everything adopted, in one place
-
-From LLAMMA: hard backstop behind the soft mechanism; model against variance. From Ammalgam: worse-of range pricing, widen-only extremes, bootstrap gating, depth-tied and Sybil-resistant caps, zero-bonus triggers. From GammaSwap: rate caps; steep late-utilization origination fees. From Timeswap: terms + interest reserve. From InfinityPools: worst-case range math for `forceClose`; passive-lender UX. From Ajna: origination fee, dust minimums. From Panoptic: internal median oracle; yield-before-principal haircuts; capped closure incentives.
+From LLAMMA: the hard backstop behind the soft mechanism, and modeling losses against realized variance rather than price levels. From Ammalgam: worse-of range pricing, widen-only extremes, the bootstrap gate, depth-tied and Sybil-resistant caps, zero-bonus triggers. From GammaSwap: valuation-free triggers, rate ceilings, steep late-utilization pricing. From Timeswap: terms. From InfinityPools: worst-case range math, and lenders-stay-passive. From Ajna: origination fees and dust minimums. From Panoptic: the internal median filter and yield-before-principal loss ordering.
 
 ---
 
-## 4. What an oracle-free lender must actually defend
+## 4. What an oracle-free lender actually has to defend
 
-### 4.1 Threat model for price manipulation
+### 4.1 The threat model: assume the price can lie, briefly
 
-Moving a v4 pool's spot across `[√P, √P′]` against constant liquidity `L` costs `Δy = L(√P′ − √P)` of capital exposure plus ~2× fees on the round trip — large for deep pools, and the classic analysis of *TWAP* manipulation made it astronomical (Uniswap's example: shifting a 30-minute USDC/ETH TWAP by 20% with two controlled blocks ≈ $709B of cost, [source](https://blog.uniswap.org/uniswap-v3-oracles)).
+Moving a pool's spot price is not free — pushing it requires capital exposure plus fees, scaled by the pool's depth — and the classical analysis of manipulating a **TWAP** (a time-weighted average price) made long-window manipulation astronomically expensive. That comfort died with Ethereum's move to proof-of-stake. A validator who proposes two *consecutive* blocks can set any price at the end of the first and unwind it at the top of the second, exposed to no arbitrage in between, paying roughly swap fees. Consecutive-slot proposers are routine — a 1%-stake validator sees three in a row every few months. The honest modern assumption, which this design makes everywhere, is: **an adversary can buy one or two blocks of arbitrary pool price for approximately the cost of the fees.**
 
-Post-merge, that comfort is gone for short horizons: a block proposer with **consecutive slots** can set any price at the end of block N and unwind at the top of N+1 with zero arbitrage exposure — cost collapses to fees. Consecutive-slot proposers are routine (a 1%-stake validator sees 3-in-a-row roughly every five months; [ChainSecurity](https://www.chainsecurity.com/blog/oracle-manipulation-after-merge), [measurement](https://arxiv.org/pdf/2501.12827)). **Design assumption: an adversary can buy 1–2 blocks of arbitrary pool price for approximately the swap fees.**
+### 4.2 Why liquidation is the safe side, and origination the exposed one
 
-### 4.2 Where that bites, and where it doesn't
+Here the design's shape pays for itself. Suppose the adversary shoves the price into a victim's liquidation range. What have they bought? A *rate-limited* decay begins: bounded loss per interval, penalties flowing to LPs, and the whole process pausing the moment the adversary stops holding the price there. There is no liquidation bonus to collect (no atomic liquidation exists) and no forced one-shot sale to trade against. The attacker pays two-way fees and slippage to inflict a small, partially recoverable cost on someone else — an attack with *negative* expected value. Gradualness is not just borrower-friendly; it is what makes the oracle-free trigger safe to expose.
 
-**Liquidation is the safe side, structurally.** Pushing the price into a victim's range starts a *rate-limited* decay: bounded loss per interval, penalty flowing to LPs, fully pausable the moment the attacker lets go. There is no bonus to farm (no atomic liquidation exists) and no forced one-shot sale to sandwich. The attacker pays two-way fees and slippage to inflict a small, partially recoverable cost — an attack with negative expected value. This is the deep reason gradual liquidation and oracle-freedom belong together.
+Origination has no such structural protection: a manipulated valuation at open mints real bad debt (pump the collateral's price, borrow against the inflated value, let it revert). Every opening defense in [DESIGN.md §6](DESIGN.md) maps to a specific move available to the two-block adversary:
 
-**Origination is the exposed side.** One manipulated block at `open` mints real bad debt: pump collateral price → borrow at inflated valuation → let price revert. Every origination defense in DESIGN.md §6 maps to a specific move available to the 1–2-block adversary of §4.1:
-
-| Adversary move | Defense that kills it |
+| Adversary's move | The defense that kills it |
 |---|---|
-| spike spot in the borrow block | value collateral at worse-of(spot, truncated median); truncation (±9,116 ticks/observation, ~2.49×) means a spike needs ~15 *sustained, arb-bleeding* blocks to reach the median |
-| spike and revert within one observation interval | widen-only per-interval extremes still record the excursion against the borrower |
-| seed a fresh pool with fake history | no originations until the observation window fills |
-| grind rates or split positions to dodge caps | origination fee ≥ a week of interest; utilization hard cap; aggregate per-tick-region caps; dust minimum |
+| spike the spot price in the borrow block | collateral valued at the **worse of** spot and the truncated median — the clamp (±9,116 ticks per observation) means a spike needs many sustained, arbitrage-bleeding minutes to reach the record |
+| spike and revert *within* one observation interval | widen-only extremes record the excursion against the borrower anyway |
+| create a fresh pool with a fabricated history | no borrowing until the observation ring has filled |
+| grind rates or split positions to dodge size caps | origination fee, utilization hard cap, minimum position size |
 
-### 4.3 Interest-rate design in one paragraph
+### 4.3 A note on interest-rate design
 
-Utilization-kinked curves (Aave-shape) are the standard because the kink defends a *liquidity buffer*: near-full utilization must be punitively expensive, since repayments and withdrawals need free assets to clear — in TrueLend's case chunk proceeds also settle through the vault, so the buffer is doubly load-bearing; hence a **hard** cap at 90% on top of the steep slope. Ajna demonstrates a governance-free alternative (multiplicative ±10% drift each 12h toward target utilization) that can replace mis-set slopes later without touching anything else. A **rate ceiling** is required regardless — it is what makes the open-time interest-reserve check meaningful (§6.5).
-
----
-
-## 5. The rejected alternative, for the record
-
-During this redesign, an architecture was evaluated that would have replaced chunk execution entirely: deploy the borrower's collateral *as a passive liquidity position* spanning the liquidation band, let ordinary flow convert it, harvest "guaranteed geometric-mean proceeds" on full traversal, and treat reversals as automatic de-liquidation.
-
-It fails on §1 grounds, completely: the conversion it relies on runs in the stop direction, which passive liquidity cannot fill — in either borrow configuration — and the band it requires cannot even be minted single-sided in the needed orientation. The geometric-mean fill formula it quoted is real math for the *take-profit* traversal (kept in §6.2 because `forceClose` sizing uses it), applied to the wrong direction. In practice the position would convert when the loan got *safer* and sit inert as it got riskier.
-
-The evaluation wasn't wasted. Everything direction-agnostic it produced was kept and is now in DESIGN.md: the ERC-4626 vault + IRM design, the truncated-median oracle and the full origination defense stack, the trigger-tick bitmap and bounded per-swap execution, ERC-6909 claims settlement, the decimals-safe Q96 range math, terms + coverage backstop, the bad-debt waterfall, and the v4 mechanics verification (DESIGN.md Appendix B). One genuinely useful fragment survives as a possible future feature: a **take-profit range order on the safe side** of a position (auto-deleverage into strength) *is* implementable — it just isn't liquidation.
+Utilization-kinked curves are the industry standard because the kink defends a *liquidity buffer* — near-full utilization must be punitively expensive, since withdrawals and repayments need free cash to clear. TrueLend's version is stricter than most (a **hard** cap at 90% on top of the steep slope) for a reason specific to this design: liquidation proceeds themselves settle through the vault, so the buffer is part of the liquidation machinery, not just depositor convenience. A rate **ceiling** exists as well, because the opening health margin must be sized against the worst rate a position could ever face.
 
 ---
 
-## 6. Math reference
+## 5. The road not taken (recorded so it stays not-taken)
 
-### 6.1 Notation
+During this redesign, an architecture was seriously evaluated that would have replaced chunk execution entirely: deposit the borrower's collateral as a passive liquidity position spanning the liquidation band, let ordinary flow convert it, and treat reversals as automatic de-liquidation — with "guaranteed" proceeds computable in closed form.
 
-Price `P` = token1 per token0. `sqrtPriceX96 = √P · 2⁹⁶` (Q96). Ticks: `P = 1.0001^tick`. A position is `(L, [t_a, t_b])` with composition as in §1.1. Implementation uses `TickMath` / `SqrtPriceMath` / `FullMath` exclusively — token decimals never appear in formulas (they live inside amounts).
+It fails on §1 grounds, completely. The conversion it relies on runs in the stop direction, which passive liquidity cannot fill, in either borrow configuration; the band it requires cannot even be minted single-sided in the needed orientation; and the closed-form proceeds formula it quoted (the geometric-mean fill of a fully traversed range) is real mathematics for the *take-profit* direction, applied to the wrong traversal. In practice the position would convert when the loan got *safer* and sit inert as it got riskier.
 
-### 6.2 Passive fill prices (take-profit direction — used by `forceClose` sizing only)
+The evaluation still paid rent: everything direction-agnostic it produced was kept — the vault design, the price filter and its opening rules, the trigger bitmap, the term-and-backstop structure, the loss waterfall. And one fragment survives as a legitimate future feature: a take-profit range order on the *safe* side of a position (automatic deleveraging into strength) is exactly the order type the AMM does offer, and composes naturally as opt-in periphery.
 
-Single-sided token0 amount `X` in `[P_a, P_b]` above spot, fully traversed upward, yields `Y = X · √(P_a·P_b)` of token1 — execution at the band's geometric mean. Mirror case: token1 amount `Y` below spot, traversed downward, yields `X = Y / √(P_a·P_b)`. These are the only passive conversions that exist; neither is the liquidation direction (§1.2).
+---
 
-### 6.3 Liquidation range placement (decimals-safe)
+## 6. Mathematical reference
 
-Collateral `C` (token0 here; mirror case symmetrical), debt `D` (token1), threshold `LT`. Liquidation begins where debt equals LT × collateral value:
+Notation: price $P$ = token1 per token0; $\sqrt{P}$ is stored in Q96 fixed point; ticks satisfy $P = 1.0001^t$. Implementation uses exact full-width integer math throughout — token decimals never appear in formulas because they live inside raw amounts.
 
-```
-C · P_liq · LT = D        ⟹        P_liq = D / (LT · C)
-```
+**6.1 Passive fill prices** (take-profit direction — used only to size backstop sales). A single-sided amount $X$ of token0 in $[P_a, P_b]$ above spot, fully traversed upward, yields $Y = X\sqrt{P_a P_b}$ of token1 — execution at the geometric mean of the band. The mirror case yields $X = Y/\sqrt{P_a P_b}$. These are the only two passive conversions that exist; neither is the liquidation direction.
 
-Compute in √-space with mulDiv to stay exact for any token decimals:
+**6.2 Liquidation range placement.** For collateral $C$ (token0) and debt $D$ (token1) at threshold $\mathrm{LT}$, liquidation begins where debt equals $\mathrm{LT}$ × collateral value:
 
-```
-sqrtP_liq_X96 = sqrt( FullMath.mulDiv(D, 2^192, LT_bps · C / 10^4) )   // conceptually; ordered to avoid overflow
-tickStart     = TickMath.getTickAtSqrtPrice(sqrtP_liq_X96)              // round toward borrower safety
-tickEnd       = tickStart − RANGE_WIDTH                                 // range extends downward in this case
-```
+$$
+C \cdot P_{liq} \cdot \mathrm{LT} = D \quad\Longrightarrow\quad P_{liq} = \frac{D}{\mathrm{LT}\cdot C},
+$$
 
-(The v1 bug for reference: `sqrt(rawRatio) << 96` treats `√ratio · 2⁹⁶` as a sqrtPriceX96, which is only coincidentally close for 18/18-decimal pairs near price 1.)
+computed in $\sqrt{P}$-space with 512-bit intermediate multiplication so it is exact for any decimal pair; the tick is rounded toward earlier triggering, and the range extends a configured width further in the adverse direction. (v1's bug, for the record: it computed $\sqrt{\text{ratio}} \cdot 2^{96}$ directly, which is only coincidentally close for 18/18-decimal pairs near price 1.)
 
-### 6.4 Chunk pacing
+**6.3 Chunk pacing.** With remaining collateral $C_{rem}$, target count $N$, interval $\tau$, elapsed time $\Delta t$, depth-into-range $d \in [0,1]$ and position-to-depth pressure $\rho \in [0,1]$:
 
-```
-eligible : (now − lastChunk) ≥ CHUNK_INTERVAL  and  tick inside [tickStart, tickEnd]
-depth    = distance into range / range width               ∈ [0, 1]
-pressure = position value / active-liquidity value          ∈ [0, 1] (clamped)
-chunk    = (C_rem / TARGET_CHUNKS)
-           · min((now − lastChunk)/CHUNK_INTERVAL, T_CAP)
-           · (1 + depth) · (1 + pressure)
-           clamped to [MIN_CHUNK, min(MAX_CHUNK, C_rem)]
-```
+$$
+\text{chunk} = \frac{C_{rem}}{N} \cdot \min\!\Big(\frac{\Delta t}{\tau},\,5\Big)\cdot(1+d)(1+\rho),
+\qquad \text{capped at } 1\% \text{ of measured in-range depth.}
+$$
 
-Reading it: ~1% of remaining collateral per minute at baseline; missed intervals catch up (capped); danger-depth and pool-thinness each at most double the pace; `MAX_CHUNK` is additionally capped as a fraction of active liquidity so **no chunk can meaningfully move the price** — that cap is the anti-cascade guarantee in formula form. Full decay of a position takes ≥ ~25 minutes even with every multiplier maxed, ~100 minutes typically.
+Read as behavior: about 1% of the remainder per minute at baseline; missed intervals catch up (capped); danger-depth and pool-thinness each at most double the pace; and the depth cap means **no chunk can meaningfully move the price** — the anti-cascade property as a formula. Full decay takes roughly 100 minutes typically, and at least ~25 even with every multiplier maxed.
 
-### 6.5 The solvency buffer (what the modeling notebook optimizes)
+**6.4 Penalty.** Per chunk: $\text{penalty} = \text{proceeds} \times 0.5\% \times \frac{\mathrm{LT}}{100\%} \times \min(1 + t_{inLiq}/1\text{h}, 5)$ — scaling with the risk the borrower chose and the time LPs have carried the flow, capped so prolonged decay is not confiscatory.
 
-The lender is made whole if, by the time a position fully decays (or is force-closed), cumulative proceeds cover debt plus interest. To first order the **gap between LT and 100%** must absorb four costs:
+**6.5 Why guaranteed coverage caps LT — the calculation that reshaped the design.** Demand that a worst-case instant gap to the far edge of the range, with all chunks filling there, must still repay the debt. Proceeds of full conversion at the range edge are $\approx C \cdot P_{liq}/f$ for range factor $f$, so the demand becomes
 
-```
-gap  ≳  s + π + i(T) + μ
+$$
+\frac{1}{\mathrm{LT}\sqrt{f}} \ge 1 + i + h
+$$
 
-s     average slippage+fees of chunk sales across the range
-π     penalty share (goes to LPs, not lenders)
-i(T)  interest reserve to term at the rate ceiling
-μ     adverse price drift over the decay duration τ  —  μ ~ σ·√τ
-```
+(interest reserve $i$, execution haircut $h$), which caps $\mathrm{LT}$ near 50–70% for any reasonable values — the conservative regime the protocol exists to escape. This is why TrueLend prices the tail (penalties, reserves, a declared waterfall) instead of forbidding it, and why the buffer inequality below is a *modeling* target rather than an on-chain check.
 
-The tension the notebook sweeps: faster pacing (smaller τ) shrinks the drift term `μ` but raises the impact term `s`; wider ranges lower `s` per tick but lengthen τ. Output: `TARGET_CHUNKS`, `CHUNK_INTERVAL`, `RANGE_WIDTH`, and the max-LT tier per pool depth such that `gap` covers the sum at (say) 99th-percentile historical volatility. This is the quantitative core of the "financial modelling" workstream and the analogue of LLAMMA's empirical ~1%-per-10%-excursion loss law.
+**6.6 The buffer inequality.** Over a decay episode of duration $T$, the gap between LT and 100% must absorb execution costs $s$, penalties $\pi$, episode interest $i(T)$, and 99th-percentile adverse drift $\mu \sim z_{0.99}\,\sigma\sqrt{T}$:
 
-### 6.6 Penalty
+$$
+1 - \mathrm{LT} \;\gtrsim\; s + \pi + i(T) + \mu.
+$$
 
-```
-penalty = proceeds · BASE_PENALTY · (LT / 100) · min(1 + timeInLiq/1h, 5)
-```
+Faster pacing shrinks $\mu$ but raises $s$; wider ranges lower $s$ per tick but lengthen $T$. Locating the optimum per pool tier is the parameter-modelling workstream — [PARAMETERS.md](PARAMETERS.md) carries the full derivations, calibrations, and first-cut tier tables.
 
-Scales with chosen risk (LT) and with how long LPs have carried the flow; capped at 5× so prolonged decay isn't confiscatory; routed to in-range LPs via `donate()`, minus the poke/forceClose reward sliver.
-
-### 6.7 Manipulation cost quick-reference
-
-Spot move across `[√P, √P′]` at constant `L`: capital `Δy = L(√P′−√P)` (token1 side) or `Δx = L(1/√P − 1/√P′)`. TWAP over window `W` moved by factor `p` while controlling `k` blocks needs spot at `p^{W/k}`. With truncation at 9,116 ticks per observation, recorded price moves at most ~2.49× per observation regardless of spot — reaching a target multiple `m` takes ~`log₂.₄₉(m)` consecutive manipulated observations, each bleeding arbitrage.
+**6.7 Manipulation cost quick-reference.** Moving spot across $[\sqrt{P}, \sqrt{P'}]$ against constant liquidity $L$ requires $\Delta y = L(\sqrt{P'}-\sqrt{P})$. Moving a $W$-window average by factor $p$ while controlling $k$ blocks needs spot at $p^{W/k}$. With the ±9,116-tick truncation, each observation moves at most ~2.49× regardless of spot, so reaching a multiple $m$ takes $\log_{2.49} m$ consecutive manipulated observations, each bleeding arbitrage.
 
 ---
 
 ## 7. Sources
 
-**Uniswap mechanics** — [v4-core](https://github.com/Uniswap/v4-core) · [Range orders (docs)](https://docs.uniswap.org/concepts/protocol/range-orders) · [Range orders (support)](https://support.uniswap.org/hc/en-us/articles/20980601560717-What-is-a-range-order) · [Loesch — v3 as a limit-order machine](https://medium.com/@odtorson/how-to-use-uniswap-v3-as-a-limit-order-machine-a529cf369dd) · [Truncated oracle hook](https://blog.uniswap.org/uniswap-v4-truncated-oracle-hook) · [v3 oracle manipulation analysis](https://blog.uniswap.org/uniswap-v3-oracles) · [JIT liquidity study](https://blog.uniswap.org/jit-liquidity) · [Custom accounting guide](https://developers.uniswap.org/contracts/v4/guides/custom-accounting) · [v4-template](https://github.com/Uniswap/v4-template) · [OpenZeppelin uniswap-hooks](https://github.com/OpenZeppelin/uniswap-hooks) · [saucepoint/v4-stoploss](https://github.com/saucepoint/v4-stoploss)
+**Uniswap mechanics** — [v4-core](https://github.com/Uniswap/v4-core) · [Range orders (docs)](https://docs.uniswap.org/concepts/protocol/range-orders) · [Range orders (support)](https://support.uniswap.org/hc/en-us/articles/20980601560717-What-is-a-range-order) · [Loesch — v3 as a limit-order machine](https://medium.com/@odtorson/how-to-use-uniswap-v3-as-a-limit-order-machine-a529cf369dd) · [Truncated oracle hook](https://blog.uniswap.org/uniswap-v4-truncated-oracle-hook) · [v3 oracle manipulation analysis](https://blog.uniswap.org/uniswap-v3-oracles) · [JIT liquidity study](https://blog.uniswap.org/jit-liquidity) · [Custom accounting guide](https://developers.uniswap.org/contracts/v4/guides/custom-accounting) · [OpenZeppelin uniswap-hooks](https://github.com/OpenZeppelin/uniswap-hooks) · [saucepoint/v4-stoploss](https://github.com/saucepoint/v4-stoploss)
 
 **Protocols** — [Instadapp: Oracleless Lending on v4](https://blog.instadapp.io/oracleless-lending-protocol-on-uniswap-v4/) · [crvUSD whitepaper](https://resources.curve.finance/pdf/curve-stablecoin.pdf) · [LLAMMA explainer](https://docs.curve.finance/developer/crvusd/llamma-explainer) · [Soft liquidations](https://resources.curve.finance/crvusd/advanced-liquidation/) · [IntoTheBlock on crvUSD losses](https://medium.com/intotheblock/crvusd-liquidating-them-softly-20079dcb527d) · [LlamaLend post-mortem](https://gov.curve.finance/t/llamalend-sdola-long2-post-mortem/11020) · [LIKWID](https://docs.likwid.fi/) · [Ajna whitepaper](https://www.ajna.finance/pdf/Ajna_Protocol_Whitepaper_01-11-2024.pdf) · [Block Analitica on Ajna auctions](https://blockanalitica.substack.com/p/ajna-liquidation-analysis) · [Timeswap whitepaper](https://timeswap.io/whitepaper.pdf) · [InfinityPools](https://docs.infinitypools.finance/protocol-overview/introduction) · [Panoptic paper](https://arxiv.org/abs/2204.14232) · [Panoptic liquidations](https://panoptic.xyz/docs/panoptic-protocol/liquidations) · [GammaSwap](https://docs.gammaswap.com) · [Ammalgam](https://docs.ammalgam.xyz) · [Bunni v2](https://docs.bunni.xyz/docs/v2/technical/overview/)
 
-**Economics** — [LVR (Milionis–Moallemi–Roughgarden–Zhang)](https://arxiv.org/pdf/2208.06046) · [a16z LVR explainer](https://a16zcrypto.com/posts/article/lvr-quantifying-the-cost-of-providing-liquidity-to-automated-market-makers/) · [Euler TWAP attack-cost model](https://github.com/euler-xyz/uni-v3-twap-manipulation/blob/master/cost-of-attack.tex) · [ChainSecurity — oracle manipulation post-merge](https://www.chainsecurity.com/blog/oracle-manipulation-after-merge) · [Multi-block MEV measurement](https://arxiv.org/pdf/2501.12827) · [JIT attacks (IACR 2023/973)](https://eprint.iacr.org/2023/973.pdf) · [Aave IRM (RareSkills)](https://www.rareskills.io/post/aave-interest-rate-model)
-
+**Economics** — [LVR (Milionis–Moallemi–Roughgarden–Zhang)](https://arxiv.org/pdf/2208.06046) · [a16z LVR explainer](https://a16zcrypto.com/posts/article/lvr-quantifying-the-cost-of-providing-liquidity-to-automated-market-makers/) · [Euler TWAP attack-cost model](https://github.com/euler-xyz/uni-v3-twap-manipulation/blob/master/cost-of-attack.tex) · [ChainSecurity — oracle manipulation post-merge](https://www.chainsecurity.com/blog/oracle-manipulation-after-merge) · [Multi-block MEV measurement](https://arxiv.org/pdf/2501.12827) · [Aave IRM (RareSkills)](https://www.rareskills.io/post/aave-interest-rate-model)
 
 ---
 
 ## Appendix: could the chunk engine liquidate perps?
 
-Short answer: **yes — a perp on this engine is a looped TrueLend loan, and the liquidation mechanism carries over unchanged.** What changes is only the vocabulary and one periphery contract.
+Short answer: **yes — a perp on this engine is a looped TrueLend loan, and the liquidation mechanism carries over unchanged.** What changes is vocabulary and one periphery contract.
 
-### The construction
+**The construction.** A leveraged long on ETH margined in USDC is, stripped of branding, *hold ETH, owe USDC* — which is a TrueLend position. Leverage comes from looping: deposit ETH, borrow USDC, buy ETH with it, add that to the collateral, repeat — and a small periphery "LeverageRouter" can do the whole loop atomically in one transaction. The result is a single hook position where exposure is the total ETH held, margin is what the trader actually funded, and leverage $= 1/(1-\mathrm{LTV})$: 94% LTV is ~17×, 98% is 50×. A short is the mirror image, in the direction the hook already supports.
 
-A leveraged long on ETH (margin in USDC) is exactly: *hold ETH collateral, owe USDC debt*. That is a TrueLend position. Leverage comes from looping — deposit ETH, borrow USDC, buy ETH with it, add to collateral, repeat — which a small periphery "LeverageRouter" can do atomically in one transaction (v4 flash accounting: borrow, swap, deposit inside one unlock). The result is a single hook position with:
+**The dictionary.** Initial margin = $1-\mathrm{LTV}$ at open. **Maintenance margin = $1-\mathrm{LT}$** — an LT-99 position runs 1% maintenance margin. The bankruptcy price is the range's far edge, and the range interior becomes a *progressive auto-deleveraging zone*: losses realize gradually through the band instead of via one-shot ADL. The funding rate emerges with no funding oracle at all: long open interest borrows the USDC vault while short open interest borrows the ETH vault, so a skew in open interest becomes a skew in utilizations becomes a rate differential — funding discovered by the same kink curve that prices ordinary borrowing.
 
-```
-exposure   = C            (total ETH held as collateral)
-margin     = C − D/P      (what the trader actually funded)
-leverage   = 1 / (1 − LTV)          LTV 94% → ~17x · LTV 98% → 50x
-```
+**Why the margin still cannot sit "in the range" passively.** The question "couldn't the perp's margin be deposited into the band and liquidate itself?" has the same answer §1 forced for loans: a long's liquidation requires selling ETH as ETH falls — the stop-side trade passive liquidity cannot make, for margin exactly as for collateral. That is precisely why the chunk engine is the transferable asset here: it is a liquidation mechanism for *any* levered claim whose collateral and debt are the pool's two tokens.
 
-A short is the mirror image (USDC collateral, ETH debt) — the direction the hook already supports.
-
-### The dictionary: lending terms ↔ perp terms
-
-| Lending (as built) | Perp equivalent |
-|---|---|
-| 1 − LTV at open (≥ 5% of LT by headroom) | **initial margin** |
-| 1 − LT | **maintenance margin** (LT 99% = 1% MM) |
-| liquidation range start (LT price) | margin-call price |
-| liquidation range **end** | **bankruptcy price** |
-| the range between them + chunk decay | **partial liquidation / auto-deleveraging zone** — losses realized progressively instead of one-shot ADL |
-| chunk penalty → LPs | liquidation fee → the venue's liquidity |
-| borrow APR on the debt vault | **funding rate** — and it is *organically skew-sensitive*: long OI borrows the USDC vault, short OI borrows the ETH vault, so one-sided open interest pushes that vault's utilization and rate up. Funding emerges from the kink curve with no funding-rate oracle |
-| `forceClose` past range end / health breach | backstop liquidation at bankruptcy |
-| term + expiry | naturally gives **dated futures**; rolling = close+reopen (a perp needs the router to roll, or no term for perp-mode pools) |
-
-### Why the margin still cannot sit "in the range" as a passive order
-
-The question "how would collateral be deposited in the range for perps" has the same answer §1 forced for lending: it can't, passively. A long's liquidation requires *selling ETH as ETH falls* — the stop-side trade passive liquidity cannot make, for margin exactly as for loan collateral. Perp margin systems on AMMs face the identical impossibility, which is why the chunk engine (active, rate-limited, in-range execution) is the transferable asset here: it is a liquidation mechanism for *any* levered claim whose collateral and debt are the pool's two tokens — lending today, perps via looping, and in principle any margined spot structure.
-
-### What would actually need building (deliberately not in v1)
-
-1. **LeverageRouter** (~150 lines periphery): atomic loop/unloop, roll at expiry, PnL-at-a-glance views. The hook itself is unchanged.
-2. **Config profile for perp pools**: higher open-LTV headroom (the 95% constant caps leverage at ~17x; 98–99% headroom → 50–100x), shorter or no term, possibly narrower ranges (tighter bankruptcy gap at high leverage).
-3. **Honest UX framing**: this is fully-collateralized isolated margin — no cross-margin, no unrealized-PnL-as-margin, no negative balances (bankruptcy price is a hard floor by construction, like InfinityPools). That is a *feature* (no socialized ADL, no insurance-fund blowups) but it is margin trading, not a CEX-style perp, and should be sold as such.
-4. **The same modeling notebook**, with a leverage axis: at 50x the liquidation range is ~2% wide and the pacing constants matter much more; chunk interval and depth caps need to be re-derived per leverage tier.
+**What would need building** (deliberately not in v1): the LeverageRouter (~150 lines); a perp-profile pool config (higher opening headroom for higher max leverage, shorter or no term, tighter ranges); and honest framing — this is fully-collateralized isolated margin with a hard bankruptcy floor (no negative balances, no socialized ADL), which is a feature, but it is margin trading, not a CEX perp, and should be sold as such. The same parameter model applies with a leverage axis: at 50× the range is ~2% wide and pacing constants matter far more.
