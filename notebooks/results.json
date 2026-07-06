@@ -1,0 +1,455 @@
+{
+  "lt_max_simulated": {
+    "stable": 0.99,
+    "major": 0.95,
+    "longtail": null
+  },
+  "tolerances": {
+    "shortfall_freq": 0.01,
+    "shortfall_sev": 0.05,
+    "exhaustion": 0.005
+  },
+  "grid": [
+    {
+      "tier": "stable",
+      "lt": 0.9,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.0,
+      "shortfall_sev": 0.0,
+      "exhaustion": 0.0,
+      "cost_med_bps": 96.16224754381417,
+      "cost_p95_bps": 96.94901873145494,
+      "dur_med_h": 3.973333333333333,
+      "frac": {
+        "repaid": 0.9035,
+        "recovered": 0.0965,
+        "backstop": 0.0,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "stable",
+      "lt": 0.95,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.0,
+      "shortfall_sev": 0.0,
+      "exhaustion": 0.0,
+      "cost_med_bps": 95.82226131317012,
+      "cost_p95_bps": 96.5141906121791,
+      "dur_med_h": 5.323333333333333,
+      "frac": {
+        "repaid": 0.89,
+        "recovered": 0.11,
+        "backstop": 0.0,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "stable",
+      "lt": 0.97,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.0,
+      "shortfall_sev": 0.0,
+      "exhaustion": 0.0,
+      "cost_med_bps": 74.16605518763348,
+      "cost_p95_bps": 74.40273564625511,
+      "dur_med_h": 6.306666666666667,
+      "frac": {
+        "repaid": 0.8905,
+        "recovered": 0.1095,
+        "backstop": 0.0,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "stable",
+      "lt": 0.99,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.0,
+      "shortfall_sev": 0.0,
+      "exhaustion": 0.0,
+      "cost_med_bps": 30.031648851407038,
+      "cost_p95_bps": 30.13595875696737,
+      "dur_med_h": 8.353333333333333,
+      "frac": {
+        "repaid": 0.86925,
+        "recovered": 0.13075,
+        "backstop": 0.0,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.9,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.00125,
+      "shortfall_sev": 0.03050447171189352,
+      "exhaustion": 0.00125,
+      "cost_med_bps": 108.84114134405948,
+      "cost_p95_bps": 119.63298216850562,
+      "dur_med_h": 4.013333333333334,
+      "frac": {
+        "repaid": 0.50675,
+        "recovered": 0.492,
+        "backstop": 0.00125,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.0035,
+      "shortfall_sev": 0.04447792677223737,
+      "exhaustion": 0.0035,
+      "cost_med_bps": 108.26633412159175,
+      "cost_p95_bps": 120.8488355249231,
+      "dur_med_h": 5.208333333333333,
+      "frac": {
+        "repaid": 0.439,
+        "recovered": 0.5575,
+        "backstop": 0.0035,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.97,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.036,
+      "shortfall_sev": 0.016022672929811202,
+      "exhaustion": 0.036,
+      "cost_med_bps": 90.5475167063624,
+      "cost_p95_bps": 100.01333534974644,
+      "dur_med_h": 4.458333333333333,
+      "frac": {
+        "repaid": 0.372,
+        "recovered": 0.592,
+        "backstop": 0.036,
+        "live": 0.0
+      },
+      "accepted": false
+    },
+    {
+      "tier": "major",
+      "lt": 0.99,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.688,
+      "shortfall_sev": 0.01631826148406031,
+      "exhaustion": 0.688,
+      "cost_med_bps": 197.10489598339922,
+      "cost_p95_bps": 240.9767924841187,
+      "dur_med_h": 0.755,
+      "frac": {
+        "repaid": 0.00125,
+        "recovered": 0.30825,
+        "backstop": 0.688,
+        "live": 0.0025
+      },
+      "accepted": false
+    },
+    {
+      "tier": "longtail",
+      "lt": 0.9,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.005,
+      "shortfall_sev": 0.04582419339219515,
+      "exhaustion": 0.0055,
+      "cost_med_bps": 183.19784016339403,
+      "cost_p95_bps": 186.16636939023442,
+      "dur_med_h": 4.13,
+      "frac": {
+        "repaid": 0.61025,
+        "recovered": 0.38425,
+        "backstop": 0.0055,
+        "live": 0.0
+      },
+      "accepted": false
+    },
+    {
+      "tier": "longtail",
+      "lt": 0.95,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.107,
+      "shortfall_sev": 0.016268217972185684,
+      "exhaustion": 0.107,
+      "cost_med_bps": 190.3824457350505,
+      "cost_p95_bps": 259.2500944252719,
+      "dur_med_h": 6.001666666666667,
+      "frac": {
+        "repaid": 0.45225,
+        "recovered": 0.4405,
+        "backstop": 0.107,
+        "live": 0.00025
+      },
+      "accepted": false
+    },
+    {
+      "tier": "longtail",
+      "lt": 0.97,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.608,
+      "shortfall_sev": 0.015806278223133546,
+      "exhaustion": 0.608,
+      "cost_med_bps": 258.29800046664,
+      "cost_p95_bps": 323.63871435328923,
+      "dur_med_h": 1.03,
+      "frac": {
+        "repaid": 0.0465,
+        "recovered": 0.344,
+        "backstop": 0.608,
+        "live": 0.0015
+      },
+      "accepted": false
+    },
+    {
+      "tier": "longtail",
+      "lt": 0.99,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.86575,
+      "shortfall_sev": 0.026284870795129155,
+      "exhaustion": 0.86575,
+      "cost_med_bps": 308.8111074823513,
+      "cost_p95_bps": 318.1523498449735,
+      "dur_med_h": 0.14333333333333334,
+      "frac": {
+        "repaid": 0.0,
+        "recovered": 0.13425,
+        "backstop": 0.86575,
+        "live": 0.0
+      },
+      "accepted": false
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 50,
+      "tau": 30.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.002,
+      "shortfall_sev": 0.03528669364734505,
+      "exhaustion": 0.002,
+      "cost_med_bps": 94.84062694421443,
+      "cost_p95_bps": 96.04188325857122,
+      "dur_med_h": 1.6366666666666667,
+      "frac": {
+        "repaid": 0.6865,
+        "recovered": 0.3115,
+        "backstop": 0.002,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 50,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.00125,
+      "shortfall_sev": 0.03338673969826974,
+      "exhaustion": 0.00125,
+      "cost_med_bps": 103.67821293516116,
+      "cost_p95_bps": 106.60385057514407,
+      "dur_med_h": 2.75,
+      "frac": {
+        "repaid": 0.60175,
+        "recovered": 0.397,
+        "backstop": 0.00125,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 50,
+      "tau": 120.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.00175,
+      "shortfall_sev": 0.05679326347709602,
+      "exhaustion": 0.00175,
+      "cost_med_bps": 110.20662441819293,
+      "cost_p95_bps": 121.85333076712944,
+      "dur_med_h": 5.346666666666667,
+      "frac": {
+        "repaid": 0.4465,
+        "recovered": 0.55175,
+        "backstop": 0.00175,
+        "live": 0.0
+      },
+      "accepted": false
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 100,
+      "tau": 30.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.00275,
+      "shortfall_sev": 0.03896922056004657,
+      "exhaustion": 0.00275,
+      "cost_med_bps": 105.21483684976869,
+      "cost_p95_bps": 109.6541433567075,
+      "dur_med_h": 3.3266666666666667,
+      "frac": {
+        "repaid": 0.53375,
+        "recovered": 0.4635,
+        "backstop": 0.00275,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.00175,
+      "shortfall_sev": 0.028679866173701583,
+      "exhaustion": 0.00175,
+      "cost_med_bps": 109.00334131655715,
+      "cost_p95_bps": 120.85714265512173,
+      "dur_med_h": 5.46,
+      "frac": {
+        "repaid": 0.448,
+        "recovered": 0.55025,
+        "backstop": 0.00175,
+        "live": 0.0
+      },
+      "accepted": true
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 100,
+      "tau": 120.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.008,
+      "shortfall_sev": 0.03876942819642194,
+      "exhaustion": 0.008,
+      "cost_med_bps": 81.56987790080339,
+      "cost_p95_bps": 132.70744821284808,
+      "dur_med_h": 4.655,
+      "frac": {
+        "repaid": 0.17425,
+        "recovered": 0.6575,
+        "backstop": 0.008,
+        "live": 0.16025
+      },
+      "accepted": false
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 200,
+      "tau": 30.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.004,
+      "shortfall_sev": 0.06225512594890624,
+      "exhaustion": 0.004,
+      "cost_med_bps": 107.02300088867993,
+      "cost_p95_bps": 123.93165531498985,
+      "dur_med_h": 5.475,
+      "frac": {
+        "repaid": 0.42075,
+        "recovered": 0.57525,
+        "backstop": 0.004,
+        "live": 0.0
+      },
+      "accepted": false
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 200,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.008,
+      "shortfall_sev": 0.04457888519987391,
+      "exhaustion": 0.008,
+      "cost_med_bps": 79.8320235045847,
+      "cost_p95_bps": 132.25978809152235,
+      "dur_med_h": 4.6866666666666665,
+      "frac": {
+        "repaid": 0.133,
+        "recovered": 0.65125,
+        "backstop": 0.008,
+        "live": 0.20775
+      },
+      "accepted": false
+    },
+    {
+      "tier": "major",
+      "lt": 0.95,
+      "N": 200,
+      "tau": 120.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9,
+      "shortfall_freq": 0.037,
+      "shortfall_sev": 0.018859695113250818,
+      "exhaustion": 0.037,
+      "cost_med_bps": 46.66010271103242,
+      "cost_p95_bps": 121.61831009301119,
+      "dur_med_h": 4.016666666666667,
+      "frac": {
+        "repaid": 0.0,
+        "recovered": 0.66775,
+        "backstop": 0.037,
+        "live": 0.29525
+      },
+      "accepted": false
+    }
+  ]
+}

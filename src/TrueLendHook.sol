@@ -652,13 +652,20 @@ contract TrueLendHook is BaseHook {
         if (LiqRangeMath.pastRange(pos.collateralIs0, tick, pos.tickEnd)) return 1;
         if (block.timestamp > pos.expiry) return 2;
 
-        // health breach: at the CURRENT price, remaining collateral (after the
-        // slippage buffer) no longer covers the debt — interest erosion or a
-        // partial gap-through has made waiting strictly worse for lenders
+        // health breach: at the CURRENT price, remaining collateral (after a
+        // buffer) no longer covers the debt — interest erosion or a partial
+        // gap-through has made waiting strictly worse for lenders. The buffer
+        // is capped at half the position's own LT gap: a fixed buffer wider
+        // than (1 - LT) would preempt the entire gradual range for high-LT
+        // positions, since a position enters its range at LTV = LT by
+        // definition (finding from the parameter model, PARAMETERS.md).
         uint256 debt = _debtVault(pos).debtAssetsForShares(pos.debtShares);
         uint256 collValue =
             LiqRangeMath.convertAtSqrtPrice(pos.collateral, TickMath.getSqrtPriceAtTick(tick), pos.collateralIs0);
-        uint256 usable = FullMath.mulDiv(collValue, BPS - configs[pos.poolId].slippageBufferBps, BPS);
+        uint256 bufferBps = configs[pos.poolId].slippageBufferBps;
+        uint256 halfGap = (BPS - pos.ltBps) / 2;
+        if (bufferBps > halfGap) bufferBps = halfGap;
+        uint256 usable = FullMath.mulDiv(collValue, BPS - bufferBps, BPS);
         if (usable < debt) return 3;
         return 0;
     }
@@ -697,7 +704,12 @@ contract TrueLendHook is BaseHook {
     function _currentPenaltyBps(Position storage pos, Config memory cfg) internal view returns (uint256) {
         uint256 timeInLiq = pos.timeInLiqAccrued;
         if (pos.liqStartedAt != 0) timeInLiq += block.timestamp - pos.liqStartedAt;
-        return ChunkMath.penaltyBps(cfg.basePenaltyBps, pos.ltBps, timeInLiq, cfg.timeCapX);
+        uint256 raw = ChunkMath.penaltyBps(cfg.basePenaltyBps, pos.ltBps, timeInLiq, cfg.timeCapX);
+        // capped at a quarter of the position's LT gap: a penalty larger than
+        // the gap makes full repayment through decay arithmetically impossible
+        // at high LT (parameter-model finding, PARAMETERS.md)
+        uint256 quarterGap = (BPS - pos.ltBps) / 4;
+        return raw > quarterGap ? quarterGap : raw;
     }
 
     /// @dev Token depth of current in-range liquidity spread across the position's

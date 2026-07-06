@@ -234,11 +234,13 @@ Per grid point, over all episodes: shortfall frequency and conditional severity 
 - **Inputs**: per-pair realized vol series (exchange candles); tick-level pool depth snapshots from the target chain (the contract's own `_rangeDepthTokens` measure, sampled); L2 gas price history for §6.3.
 - **Sensitivity report**: tornado chart of $\mathrm{LT}_{max}$ against ±50% perturbation of each calibrated input — any input whose perturbation moves $\mathrm{LT}_{max}$ by more than one tier gets a conservative haircut in production values.
 
-### 7.5 Deliverables
+### 7.5 Deliverables — status
 
-1. `notebooks/parameters.ipynb` — calibration, closed-form first cuts (reproducing §4–6), simulator, sweep, acceptance report.
-2. A per-tier config table (the production values for every §1 parameter) emitted as JSON, consumed by the deployment scripts' `setConfig` calls.
-3. This document updated with the simulated values beside each first cut.
+1. ✅ [`notebooks/parameters.py`](notebooks/parameters.py) / [`parameters.ipynb`](notebooks/parameters.ipynb) — calibration constants, closed-form first cuts (reproducing §4–6), the engine replica cross-checked against the Solidity test vectors, the simulator, the sweep, and figures. Results: [`notebooks/RESULTS.md`](notebooks/RESULTS.md), raw metrics in [`notebooks/results.json`](notebooks/results.json).
+2. ✅ Per-tier recommendations tabulated in RESULTS.md (JSON emission for `setConfig` wiring: next iteration, together with live calibration).
+3. ✅ Simulated values beside the first cuts: see §8 below.
+
+**Two protocol changes the model forced** (both merged with regression tests): the reason-3 health buffer and the effective penalty are now capped per position at half and a quarter of the LT gap respectively — the fixed config values silently preempted or bankrupted any position with LT above ~98%. Details in RESULTS.md.
 
 ---
 
@@ -246,7 +248,8 @@ Per grid point, over all episodes: shortfall frequency and conditional severity 
 
 | Parameter | Stable tier | Major tier | Long-tail tier |
 |---|---|---|---|
-| $\mathrm{LT}_{max}$ | 99% | 94–95% (≈96% with faster pacing) | 89–90% |
+| $\mathrm{LT}_{max}$ — first cut | 99% | 94–95% (≈96% with faster pacing) | 89–90% |
+| $\mathrm{LT}_{max}$ — **simulated** | **99% ✓** (sf-freq 0.03%) | **95% ✓** (97% rejects at 3.1% freq) | **88–90%** (90% fails severity by 1.1pt via backstop-impact assumption) |
 | $N$ / $\tau$ | 100 / 60 s | **50 / 60 s** (halve the episode) | 100 / 60 s (impact-bound) |
 | Range width $w$ | 1,733 ticks may suffice | 3,466 ticks (√2) | ≥3,466; widen if jump fit demands |
 | Base penalty $p_0$ | 0.25% (episodes benign) | 0.5% | 0.75–1% (LPs carry more) |

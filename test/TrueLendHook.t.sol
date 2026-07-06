@@ -137,6 +137,21 @@ contract TrueLendHookTest is Test, Deployers {
         );
     }
 
+    /// Exact-landing swap: exactIn with a price limit at the target tick.
+    function _swapToTick(int24 target) internal {
+        vm.prank(whale);
+        swapRouter.swap(
+            poolKey,
+            SwapParams({
+                zeroForOne: true,
+                amountSpecified: -int256(1_000_000e18),
+                sqrtPriceLimitX96: TickMath.getSqrtPriceAtTick(target)
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+    }
+
     function _tick() internal view returns (int24 tick) {
         (, tick,,) = manager.getSlot0(poolId);
     }
@@ -560,6 +575,28 @@ contract TrueLendHookTest is Test, Deployers {
         hook.forceClose(id);
         assertEq(hook.getPosition(id).borrower, address(0), "closed on retry");
         assertEq(vault1.totalBorrowShares(), 0);
+    }
+
+    /// The health buffer must scale with the position's own LT gap: a fixed 2%
+    /// buffer would make any LT>98% position forceCloseable the moment it enters
+    /// its range (LTV = LT at range entry, by definition) — preempting the entire
+    /// gradual mechanism. Found by the parameter model.
+    function test_forceClose_healthBufferScalesWithLT() public {
+        vm.prank(alice);
+        bytes32 id = hook.open(poolKey, true, 100e18, 93.5e18, 9900);
+        TrueLendHook.Position memory pos = hook.getPosition(id);
+
+        // land just inside the range (tick −570; range starts at −540): LTV ≈ LT.
+        // With the capped buffer (0.5% = half the 1% gap) this must NOT be
+        // reason-3 — the old fixed 2% buffer would have fired here.
+        _swapToTick(pos.tickStart - 30);
+        assertGt(hook.getPosition(id).liqStartedAt, 0, "decaying gradually");
+        assertEq(hook.forceCloseReason(id), 0, "gradual mechanism not preempted");
+
+        // deeper (tick −700, price ~0.932): usable collateral 92.8 < debt 93.5
+        // even under the capped buffer — a true health breach
+        _swapToTick(-700);
+        assertEq(hook.forceCloseReason(id), 3, "true health breach still detected");
     }
 
     function test_forceClose_revertsWhenHealthy() public {

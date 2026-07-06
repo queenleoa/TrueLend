@@ -82,7 +82,7 @@ Three conditions end the soft treatment. Each makes the position closable by **a
 
 1. **Range exhausted.** The price fell through $1,414 with collateral still unsold — the market outran the pacing, so pacing no longer protects anyone. The remainder is sold at once.
 2. **Term expired.** 180 days passed without repayment.
-3. **Health breached.** At the *current* price, the remaining collateral (after a small execution buffer) no longer covers the debt — interest or a partial gap-through has made further waiting strictly worse for lenders.
+3. **Health breached.** At the *current* price, the remaining collateral (after an execution buffer, capped at half the position's own LT gap so it can never preempt a high-LT range) no longer covers the debt — interest or a partial gap-through has made further waiting strictly worse for lenders.
 
 The closing sale itself is **slippage-bounded**: it may move the pool price at most ~10%. If the book is drained or manipulated, the sale fills partially or not at all, the remainder stays as collateral, and the close is retried when liquidity returns. A fire sale into an empty book is structurally impossible — this exact scenario is a test (`test_forceClose_drainedPool_noFireSale`).
 
@@ -265,7 +265,7 @@ Who controls each number, with defaults. Entries marked ★ are risk parameters 
 | **Borrower**, per position | LT (50–99%) · borrow amount (LTV ≤ 95% of LT) · collateral side · size | — | risk appetite is the borrower's to choose |
 | **Pool owner**, per pool | range width ★ | √2 in price (3,466 ticks) | wide enough that jumps can't skip it |
 | | chunk count ★ / interval ★ | 100 / 60 s | the pacing: ~1%/min baseline |
-| | base penalty ★ | 0.5% | LP compensation; scales with LT and time |
+| | base penalty ★ | 0.5% | LP compensation; scales with LT and time, capped per position at ¼ of the LT gap |
 | | max LT ★ | 99% | tier by volatility & depth per PARAMETERS.md |
 | | per-chunk depth cap ★ | 1% of in-range depth | no chunk meaningfully moves price |
 | | term | 180 days | bounds silent interest erosion |
