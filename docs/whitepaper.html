@@ -233,7 +233,7 @@
   <p class="kicker">Whitepaper · Version 2.0 · July 2026</p>
   <h1>TrueLend: Oracleless Lending with AMM-Native Gradual Liquidation</h1>
   <p class="byline">A Uniswap v4 hook protocol</p>
-  <p class="deploy-line">Deployed · Unichain Sepolia (1301) · Hook <b>0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0</b></p>
+  <p class="deploy-line">Deployed · Unichain Sepolia (1301) · Hook <b>0xa731511a83D523A1df04e988873725BEE7cA90c0</b></p>
 
   <!-- identity motif: a price axis with a liquidation band -->
   <svg class="band-motif" viewBox="0 0 720 46" role="img" aria-label="Price axis with a shaded liquidation band">
@@ -728,7 +728,7 @@
 
 <h2><span class="no">9</span>Extensions</h2>
 
-<p><strong>Perpetual-style leverage.</strong> A leveraged long <em>is</em> a looped TrueLend position (deposit ETH → borrow USDC → buy ETH → redeposit), constructible atomically by a small periphery router with the liquidation engine unchanged. The dictionary: initial margin = 1−LTV; <strong>maintenance margin = 1−LT</strong> (LT 99% ⇒ 1% maintenance margin); bankruptcy price = the range's far edge; the range interior = a progressive auto-deleveraging zone replacing one-shot ADL. Funding emerges organically: long open interest borrows one vault, short open interest the other, so OI skew becomes utilization skew becomes a rate differential — funding without a funding oracle. The §3 impossibility applies to perp margin identically, which is precisely why the chunk engine transfers intact.</p>
+<p><strong>Perpetual-style leverage.</strong> A leveraged long <em>is</em> a looped TrueLend position (deposit ETH → borrow USDC → buy ETH → redeposit), implemented as the <code>LeverageRouter</code> periphery: inside one PoolManager unlock it flash-takes the debt token, swaps it into collateral through the same pool, opens a single trader-owned position, and settles the flash with the loan the hook disburses — the liquidation engine unchanged, and the origination oracle's worse-of pricing immune to the router's own flash-swap impact. The dictionary: initial margin = 1−LTV; <strong>maintenance margin = 1−LT</strong> (LT 99% ⇒ 1% maintenance margin); bankruptcy price = the range's far edge; the range interior = a progressive auto-deleveraging zone replacing one-shot ADL. Funding emerges organically: long open interest borrows one vault, short open interest the other, so OI skew becomes utilization skew becomes a rate differential — funding without a funding oracle. The §3 impossibility applies to perp margin identically, which is precisely why the chunk engine transfers intact.</p>
 
 <p><em>Maximum leverage, derived.</em> The loop is a geometric series: margin <var>M</var> is deposited, a fraction LTV of its value is borrowed, swapped into the collateral asset, and redeposited, so total exposure is <var>E</var> = <var>M</var>·(1 + LTV + LTV² + …) = <var>M</var>/(1−LTV), hence:</p>
 
@@ -751,13 +751,15 @@
 
 <h2><span class="no">10</span>Implementation and status</h2>
 
-<p>Six contracts, ~1,600 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,444 bytes — 132 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, and linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>. Any pool initialized with the hook — ERC-20 pairs or native-ETH pools, the latter WETH-bridged at the hook boundary — becomes a lending market automatically. 86 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios plus 4 native-ETH pool scenarios (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
+<p>Eight contracts (six core, two periphery), ~2,100 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,457 bytes — 119 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>, plus the stateless <code>TrueLendLens</code> view aggregator and the <code>LeverageRouter</code>. Any pool initialized with the hook — ERC-20 pairs or native-ETH pools, the latter WETH-bridged at the hook boundary — becomes a lending market automatically. 94 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios, 4 native-ETH pool scenarios, 7 periphery scenarios (lens views and chunk preview, 5× flash-leverage round trip, levered-position gradual decay) (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
 
 <p><strong>Deployment — Unichain Sepolia (1301):</strong></p>
 <div class="tablewrap"><table>
   <tr><th>Contract</th><th>Address</th></tr>
-  <tr><td>TrueLendHook</td><td><code>0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0</code></td></tr>
-  <tr><td>VaultFactory</td><td><code>0x1C4E9f5b89e096c98592a304f4aF8DDc529fA057</code></td></tr>
+  <tr><td>TrueLendHook</td><td><code>0xa731511a83D523A1df04e988873725BEE7cA90c0</code></td></tr>
+  <tr><td>VaultFactory</td><td><code>0x2aAF432336Ea0D8b91398D32D0898317EfB6b420</code></td></tr>
+  <tr><td>TrueLendLens</td><td><code>0xa8ed6128aD792485F6F5E9490C3dE630870e0cF4</code></td></tr>
+  <tr><td>LeverageRouter</td><td><code>0xEc3aD4b2C872602F648F65B73a00fD3f45DCA082</code></td></tr>
   <tr><td>PoolManager (canonical)</td><td><code>0x00B036B58a818B1BC34d502D3fE730Db729e62AC</code></td></tr>
 </table></div>
 

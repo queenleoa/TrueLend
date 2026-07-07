@@ -38,14 +38,17 @@ lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueL
 | [`libraries/ChunkMath`](src/libraries/ChunkMath.sol) | the pacing formula (time × depth × pressure, clamped) |
 | [`libraries/TruncatedOracle`](src/libraries/TruncatedOracle.sol) | ±9,116-tick truncation, median-of-9, widen-only extremes, bootstrap gate |
 | [`libraries/TriggerIndex`](src/libraries/TriggerIndex.sol) | tick bitmap so `afterSwap` only touches positions whose boundaries were crossed |
+| [`periphery/TrueLendLens`](src/periphery/TrueLendLens.sol) | stateless read aggregation: position health/LTV, chunk preview, pool lending state, open quotes |
+| [`periphery/LeverageRouter`](src/periphery/LeverageRouter.sol) | leveraged spot ("perp extension"): flash-constructs one λ = 1/(1−LTV) position owned by the trader; liquidated by the ordinary chunk engine |
 
 ## Build & test
 
 ```bash
 git clone --recursive <repo>
 forge build
-forge test          # 86 tests: unit + fuzz (libraries, vault), integration
-                    # scenarios (full liquidation lifecycle), native-ETH pools, invariants
+forge test          # 94 tests: unit + fuzz (libraries, vault), integration
+                    # scenarios (full liquidation lifecycle), native-ETH pools,
+                    # periphery (lens + leverage router), invariants
 ```
 
 Test map: [`test/libraries/`](test/libraries/) (fuzzed math + oracle), [`test/LendingVault.t.sol`](test/LendingVault.t.sol) (IRM, accrual, write-off waterfall), [`test/TrueLendHook.t.sol`](test/TrueLendHook.t.sol) (open/repay/decay/pause/resume/forceClose, manipulation defense, drained-pool safety, 6-vs-18-decimals pair), [`test/TrueLendInvariants.t.sol`](test/TrueLendInvariants.t.sol) (conservation under random action sequences).
@@ -62,8 +65,10 @@ Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` fla
 
 | Network | Contract | Address |
 |---|---|---|
-| Unichain Sepolia (1301) | TrueLendHook | [`0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0`](https://sepolia.uniscan.xyz/address/0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0) |
-| Unichain Sepolia (1301) | VaultFactory | `0x1C4E9f5b89e096c98592a304f4aF8DDc529fA057` |
+| Unichain Sepolia (1301) | TrueLendHook | [`0xa731511a83D523A1df04e988873725BEE7cA90c0`](https://sepolia.uniscan.xyz/address/0xa731511a83D523A1df04e988873725BEE7cA90c0) |
+| Unichain Sepolia (1301) | VaultFactory | `0x2aAF432336Ea0D8b91398D32D0898317EfB6b420` |
+| Unichain Sepolia (1301) | TrueLendLens | `0xa8ed6128aD792485F6F5E9490C3dE630870e0cF4` |
+| Unichain Sepolia (1301) | LeverageRouter | `0xEc3aD4b2C872602F648F65B73a00fD3f45DCA082` |
 | Unichain Sepolia (1301) | PoolManager (canonical) | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
 
 ## Status & roadmap

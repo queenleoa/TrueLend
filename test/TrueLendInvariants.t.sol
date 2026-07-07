@@ -77,7 +77,7 @@ contract Handler is Test {
 
         token0.mint(address(this), collateral);
         token1.mint(address(this), collateral);
-        try hook.open(poolKey, collateralIs0, collateral, borrow, ltBps) returns (bytes32 id) {
+        try hook.open(poolKey, collateralIs0, collateral, borrow, ltBps, address(this)) returns (bytes32 id) {
             allPositions.push(id);
         } catch {} // oracle-adverse pricing, gap, or headroom can reject: fine
     }

@@ -164,7 +164,7 @@ contract TrueLendHookTest is Test, Deployers {
     /// Liquidation starts near tick -5878 (price ~0.556), range ends ~3466 lower.
     function _openDefault() internal returns (bytes32 id) {
         vm.prank(alice);
-        id = hook.open(poolKey, true, 100e18, 50e18, 9000);
+        id = hook.open(poolKey, true, 100e18, 50e18, 9000, alice);
     }
 
     // ------------------------------------------------------------------ open
@@ -201,7 +201,7 @@ contract TrueLendHookTest is Test, Deployers {
     function test_open_lt99_maxLeverage() public {
         // 100 collateral, 93.5 debt: LTV 93.5% <= 95% of LT 99%
         vm.prank(alice);
-        bytes32 id = hook.open(poolKey, true, 100e18, 93.5e18, 9900);
+        bytes32 id = hook.open(poolKey, true, 100e18, 93.5e18, 9900, alice);
 
         TrueLendHook.Position memory pos = hook.getPosition(id);
         // liquidation starts ~5.6% below spot (943 -> tick ~ -540 after alignment)
@@ -211,7 +211,7 @@ contract TrueLendHookTest is Test, Deployers {
         // ...but one notch above the headroom cap is rejected
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.LtvTooHigh.selector);
-        hook.open(poolKey, true, 100e18, 95e18, 9900);
+        hook.open(poolKey, true, 100e18, 95e18, 9900, alice);
 
         // a ~7% adverse move starts the (gradual!) liquidation
         _swap(true, 4_000e18);
@@ -237,7 +237,7 @@ contract TrueLendHookTest is Test, Deployers {
 
     function test_open_bothDirections() public {
         vm.prank(alice);
-        bytes32 id = hook.open(poolKey, false, 100e18, 50e18, 9000);
+        bytes32 id = hook.open(poolKey, false, 100e18, 50e18, 9000, alice);
         TrueLendHook.Position memory pos = hook.getPosition(id);
         // collateral = token1: danger is above spot
         assertGt(pos.tickStart, _tick());
@@ -250,27 +250,27 @@ contract TrueLendHookTest is Test, Deployers {
         // LTV above headroom (95% of LT): 86 > 0.95*90
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.LtvTooHigh.selector);
-        hook.open(poolKey, true, 100e18, 86e18, 9000);
+        hook.open(poolKey, true, 100e18, 86e18, 9000, alice);
 
         // LT bounds
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.LtOutOfBounds.selector);
-        hook.open(poolKey, true, 100e18, 10e18, 4999);
+        hook.open(poolKey, true, 100e18, 10e18, 4999, alice);
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.LtOutOfBounds.selector);
-        hook.open(poolKey, true, 100e18, 10e18, 9901);
+        hook.open(poolKey, true, 100e18, 10e18, 9901, alice);
 
         // zero amounts
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.AmountTooSmall.selector);
-        hook.open(poolKey, true, 0, 10e18, 9000);
+        hook.open(poolKey, true, 0, 10e18, 9000, alice);
 
         // unknown pool
         PoolKey memory fake = poolKey;
         fake.fee = 500;
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.PoolNotEnabled.selector);
-        hook.open(fake, true, 100e18, 10e18, 9000);
+        hook.open(fake, true, 100e18, 10e18, 9000, alice);
     }
 
     function test_open_blockedUntilOracleReady() public {
@@ -291,7 +291,7 @@ contract TrueLendHookTest is Test, Deployers {
         vm.startPrank(alice);
         a.approve(address(hook), type(uint256).max);
         vm.expectRevert(TrueLendHook.OracleNotReady.selector);
-        hook.open(k2, true, 100e18, 10e18, 9000);
+        hook.open(k2, true, 100e18, 10e18, 9000, alice);
         vm.stopPrank();
     }
 
@@ -306,7 +306,7 @@ contract TrueLendHookTest is Test, Deployers {
         // naive spot check (86/125 = 69% < 85.5%); the worse-of price says no.
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.LtvTooHigh.selector);
-        hook.open(poolKey, true, 100e18, 86e18, 9000);
+        hook.open(poolKey, true, 100e18, 86e18, 9000, alice);
     }
 
     // ------------------------------------------------------------------ repay
@@ -488,7 +488,7 @@ contract TrueLendHookTest is Test, Deployers {
     function test_multiplePositions_bothProcessed() public {
         bytes32 idA = _openDefault();
         vm.prank(bob);
-        bytes32 idB = hook.open(poolKey, true, 200e18, 90e18, 8000);
+        bytes32 idB = hook.open(poolKey, true, 200e18, 90e18, 8000, bob);
 
         // deep enough to cross both range starts but stay INSIDE both ranges
         // (tick ~ -7570; ranges end near -9200/-9300)
@@ -588,7 +588,7 @@ contract TrueLendHookTest is Test, Deployers {
     /// gradual mechanism. Found by the parameter model.
     function test_forceClose_healthBufferScalesWithLT() public {
         vm.prank(alice);
-        bytes32 id = hook.open(poolKey, true, 100e18, 93.5e18, 9900);
+        bytes32 id = hook.open(poolKey, true, 100e18, 93.5e18, 9900, alice);
         TrueLendHook.Position memory pos = hook.getPosition(id);
 
         // land just inside the range (tick −570; range starts at −540): LTV ≈ LT.
@@ -710,7 +710,7 @@ contract TrueLendHookTest is Test, Deployers {
         weth.mint(alice, 10e18);
         vm.startPrank(alice);
         weth.approve(address(hook), type(uint256).max);
-        bytes32 id = hook.open(k, wethIs0, 10e18, 12_500e6, 9000);
+        bytes32 id = hook.open(k, wethIs0, 10e18, 12_500e6, 9000, alice);
         vm.stopPrank();
 
         // liquidation trigger sits at debt/(lt*coll) = $1,388.9 per WETH
@@ -767,10 +767,10 @@ contract TrueLendHookTest is Test, Deployers {
     function test_open_revertsWhenTriggerTickCrowded() public {
         for (uint256 i = 0; i < 32; i++) {
             vm.prank(alice);
-            hook.open(poolKey, true, 100e18, 50e18, 9000); // identical range every time
+            hook.open(poolKey, true, 100e18, 50e18, 9000, alice); // identical range every time
         }
         vm.prank(alice);
         vm.expectRevert(TriggerIndex.TickCrowded.selector);
-        hook.open(poolKey, true, 100e18, 50e18, 9000);
+        hook.open(poolKey, true, 100e18, 50e18, 9000, alice);
     }
 }

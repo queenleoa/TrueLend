@@ -138,5 +138,13 @@ contract ChunkMathTest is Test {
         timeInLiq = bound(timeInLiq, 0, 3650 days);
         uint256 p = ChunkMath.penaltyBps(50, ltBps, timeInLiq, 5);
         assertLe(p, 50 * 5); // base * timeCap is the absolute ceiling (lt <= 100%)
+        assertLe(p, (10_000 - ltBps) / 4, "never exceeds a quarter of the LT gap");
+    }
+
+    /// At LT 99 the quarter-gap cap binds: raw 49 bps (and up to 245 with time)
+    /// collapses to 25 bps so decay can always repay through the 1% gap.
+    function test_penalty_quarterGapCapBindsAtHighLt() public pure {
+        assertEq(ChunkMath.penaltyBps(50, 9900, 0, 5), 25);
+        assertEq(ChunkMath.penaltyBps(50, 9900, 10 hours, 5), 25);
     }
 }

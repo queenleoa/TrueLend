@@ -51,7 +51,10 @@ library ChunkMath {
 
     /// @notice Per-chunk penalty on proceeds, in bps.
     ///   penaltyBps = base * (ltBps/1e4) * min(1 + timeInLiq/1h, timeCapX)
-    /// The time factor uses 1-hour granularity like v1, capped.
+    /// The time factor uses 1-hour granularity like v1, capped. The result is
+    /// additionally capped at a quarter of the position's LT gap: a penalty
+    /// larger than the gap makes full repayment through decay arithmetically
+    /// impossible at high LT (parameter-model finding, PARAMETERS.md).
     function penaltyBps(uint256 basePenaltyBps, uint16 ltBps, uint256 timeInLiquidation, uint256 timeCapX)
         public
         pure
@@ -61,6 +64,8 @@ library ChunkMath {
         uint256 cap = timeCapX * 100;
         if (timeX100 > cap) timeX100 = cap;
         // base * lt * time, bps-normalized at each step
-        return FullMath.mulDiv(FullMath.mulDiv(basePenaltyBps, ltBps, BPS), timeX100, 100);
+        uint256 raw = FullMath.mulDiv(FullMath.mulDiv(basePenaltyBps, ltBps, BPS), timeX100, 100);
+        uint256 quarterGap = (BPS - ltBps) / 4;
+        return raw > quarterGap ? quarterGap : raw;
     }
 }

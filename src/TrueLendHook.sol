@@ -157,6 +157,7 @@ contract TrueLendHook is BaseHook {
     error NotEligibleForForceClose();
     error UnknownAction();
     error BadConfig();
+    error ZeroAddress();
 
     modifier nonReentrant() {
         if (locked != 1) revert Reentrancy();
@@ -267,13 +268,19 @@ contract TrueLendHook is BaseHook {
     // ------------------------------------------------------------------ borrower entrypoints
 
     /// @notice Open a loan: deposit collateral in one pool currency, borrow the other.
+    /// Collateral is pulled from (and borrowed funds are sent to) msg.sender; the
+    /// position belongs to `onBehalfOf` — remaining collateral and any surplus pay
+    /// out there. This is the single accommodation periphery routers need: a
+    /// router can construct positions that belong to the trader, not the router.
     function open(
         PoolKey calldata key,
         bool collateralIs0,
         uint256 collateralAmount,
         uint256 borrowAmount,
-        uint16 ltBps
+        uint16 ltBps,
+        address onBehalfOf
     ) external payable nonReentrant returns (bytes32 positionId) {
+        if (onBehalfOf == address(0)) revert ZeroAddress();
         PoolId poolId = key.toId();
         PoolState storage pool = pools[poolId];
         Config memory cfg = configs[poolId];
@@ -324,10 +331,10 @@ contract TrueLendHook is BaseHook {
         uint256 debtShares = vault.borrow(borrowAmount, msg.sender);
         if (debtShares > type(uint128).max) revert AmountTooLarge();
 
-        positionId = keccak256(abi.encodePacked(msg.sender, PoolId.unwrap(poolId), positionNonce++));
+        positionId = keccak256(abi.encodePacked(onBehalfOf, PoolId.unwrap(poolId), positionNonce++));
         uint40 expiry = uint40(block.timestamp + cfg.termSeconds);
         positions[positionId] = Position({
-            borrower: msg.sender,
+            borrower: onBehalfOf,
             poolId: poolId,
             collateralIs0: collateralIs0,
             inQueue: false,
@@ -345,7 +352,7 @@ contract TrueLendHook is BaseHook {
         triggers[poolId].register(tickEnd, key.tickSpacing, positionId);
 
         emit PositionOpened(
-            positionId, msg.sender, poolId, collateralIs0, collateralAmount, borrowAmount, ltBps, tickStart, tickEnd, expiry
+            positionId, onBehalfOf, poolId, collateralIs0, collateralAmount, borrowAmount, ltBps, tickStart, tickEnd, expiry
         );
 
         // safety: opening straight into the range is prevented by the gap check,
@@ -741,14 +748,10 @@ contract TrueLendHook is BaseHook {
     // ------------------------------------------------------------------ views & helpers
 
     function _currentPenaltyBps(Position storage pos, Config memory cfg) internal view returns (uint256) {
+        // the quarter-LT-gap cap lives inside ChunkMath.penaltyBps
         uint256 timeInLiq = pos.timeInLiqAccrued;
         if (pos.liqStartedAt != 0) timeInLiq += block.timestamp - pos.liqStartedAt;
-        uint256 raw = ChunkMath.penaltyBps(cfg.basePenaltyBps, pos.ltBps, timeInLiq, cfg.timeCapX);
-        // capped at a quarter of the position's LT gap: a penalty larger than
-        // the gap makes full repayment through decay arithmetically impossible
-        // at high LT (parameter-model finding, PARAMETERS.md)
-        uint256 quarterGap = (BPS - pos.ltBps) / 4;
-        return raw > quarterGap ? quarterGap : raw;
+        return ChunkMath.penaltyBps(cfg.basePenaltyBps, pos.ltBps, timeInLiq, cfg.timeCapX);
     }
 
     function _debtVault(Position storage pos) internal view returns (LendingVault) {

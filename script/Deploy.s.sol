@@ -8,6 +8,8 @@ import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
 import {TrueLendHook} from "../src/TrueLendHook.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
+import {TrueLendLens} from "../src/periphery/TrueLendLens.sol";
+import {LeverageRouter} from "../src/periphery/LeverageRouter.sol";
 
 /// Deploys the VaultFactory and the TrueLendHook at a mined address whose low
 /// 14 bits encode the hook's permissions.
@@ -33,10 +35,15 @@ contract Deploy is Script {
 
         TrueLendHook hook = new TrueLendHook{salt: salt}(poolManager, factory, owner, weth);
         require(address(hook) == hookAddress, "hook address mismatch");
+
+        TrueLendLens lens = new TrueLendLens(poolManager, hook);
+        LeverageRouter router = new LeverageRouter(poolManager, hook, weth);
         vm.stopBroadcast();
 
         console.log("VaultFactory:", address(factory));
         console.log("TrueLendHook:", address(hook));
+        console.log("TrueLendLens:", address(lens));
+        console.log("LeverageRouter:", address(router));
         console.log("owner:", hook.owner());
         console.log("(initialize any pool with this hook to enable lending on it)");
     }

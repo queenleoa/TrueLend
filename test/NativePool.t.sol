@@ -136,7 +136,7 @@ contract NativePoolTest is Test, Deployers {
     function test_native_collateral_lifecycle() public {
         // alice: 100 native ETH collateral via msg.value, borrows 50 token1, LT 90
         vm.prank(alice);
-        bytes32 id = hook.open{value: 100e18}(poolKey, true, 100e18, 50e18, 9000);
+        bytes32 id = hook.open{value: 100e18}(poolKey, true, 100e18, 50e18, 9000, alice);
         assertEq(weth9.balanceOf(address(hook)), 100e18, "collateral custodied as WETH");
         assertEq(token1.balanceOf(alice), 50e18, "borrowed token1 received");
 
@@ -163,7 +163,7 @@ contract NativePoolTest is Test, Deployers {
         // alice: 100 token1 collateral, borrows 50 of the native side
         token1.mint(alice, 100e18);
         vm.prank(alice);
-        bytes32 id = hook.open(poolKey, false, 100e18, 50e18, 9000);
+        bytes32 id = hook.open(poolKey, false, 100e18, 50e18, 9000, alice);
         assertEq(weth9.balanceOf(alice), 50e18, "native debt disbursed as WETH");
 
         // repay part of it with raw ETH via msg.value
@@ -189,13 +189,13 @@ contract NativePoolTest is Test, Deployers {
         token1.mint(alice, 100e18);
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.NativeValueMismatch.selector);
-        hook.open{value: 1e18}(poolKey, false, 100e18, 50e18, 9000);
+        hook.open{value: 1e18}(poolKey, false, 100e18, 50e18, 9000, alice);
     }
 
     /// forceClose on expiry works through the native settle path end to end.
     function test_native_forceClose_expiry() public {
         vm.prank(alice);
-        bytes32 id = hook.open{value: 100e18}(poolKey, true, 100e18, 50e18, 9000);
+        bytes32 id = hook.open{value: 100e18}(poolKey, true, 100e18, 50e18, 9000, alice);
         skip(181 days);
         assertEq(hook.forceCloseReason(id), 2);
         vm.prank(keeper);
