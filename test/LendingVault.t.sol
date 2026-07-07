@@ -252,4 +252,25 @@ contract LendingVaultTest is Test {
         uint256 lenderAssets = vault.convertToAssets(vault.balanceOf(lender));
         assertGe(lenderAssets + 2, dep);
     }
+
+    /// The invariant the LeverageRouter's close path stands on: repaying ONE WEI
+    /// more than debtAssetsForShares(shares) always burns every share. Repaying
+    /// the exact debt can burn one share too few — debtOf floors shares·index/WAD
+    /// and repay() floors assets·WAD/index, and floor∘floor can lose a share —
+    /// but (debt+1)·WAD/index strictly exceeds the share count, so the cap binds.
+    function testFuzz_repay_debtPlusOneWei_alwaysClearsAllShares(uint256 bor, uint256 dt) public {
+        _deposit(lender, 500_000e6);
+        bor = bound(bor, 1e6, 400_000e6);
+        dt = bound(dt, 1, 730 days);
+
+        uint256 debtShares = vault.borrow(bor, address(this));
+        skip(dt);
+        token.mint(address(this), bor); // cover accrued interest comfortably
+
+        uint256 debt = vault.debtAssetsForShares(debtShares);
+        (uint256 burned, uint256 used) = vault.repay(debt + 1, debtShares);
+        assertEq(burned, debtShares, "all shares burned");
+        assertEq(vault.totalBorrowShares(), 0);
+        assertLe(used, debt + 1, "never consumes more than offered");
+    }
 }

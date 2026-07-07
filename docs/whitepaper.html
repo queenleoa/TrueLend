@@ -751,7 +751,7 @@
 
 <h2><span class="no">10</span>Implementation and status</h2>
 
-<p>Eight contracts (six core, two periphery), ~2,100 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,457 bytes — 119 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>, plus the stateless <code>TrueLendLens</code> view aggregator and the <code>LeverageRouter</code>. Any pool initialized with the hook — ERC-20 pairs or native-ETH pools, the latter WETH-bridged at the hook boundary — becomes a lending market automatically. 94 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios, 4 native-ETH pool scenarios, 7 periphery scenarios (lens views and chunk preview, 5× flash-leverage round trip, levered-position gradual decay) (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
+<p>Eight contracts (six core, two periphery), ~2,100 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,457 bytes — 119 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>, plus the stateless <code>TrueLendLens</code> view aggregator and the <code>LeverageRouter</code>. Any pool initialized with the hook — ERC-20 pairs or native-ETH pools, the latter WETH-bridged at the hook boundary — becomes a lending market automatically. 97 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios, 4 native-ETH pool scenarios, 9 periphery scenarios (lens views and chunk preview, 5× flash-leverage round trip, levered-position gradual decay) (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
 
 <p><strong>Deployment — Unichain Sepolia (1301):</strong></p>
 <div class="tablewrap"><table>
@@ -759,7 +759,7 @@
   <tr><td>TrueLendHook</td><td><code>0xa731511a83D523A1df04e988873725BEE7cA90c0</code></td></tr>
   <tr><td>VaultFactory</td><td><code>0x2aAF432336Ea0D8b91398D32D0898317EfB6b420</code></td></tr>
   <tr><td>TrueLendLens</td><td><code>0xa8ed6128aD792485F6F5E9490C3dE630870e0cF4</code></td></tr>
-  <tr><td>LeverageRouter</td><td><code>0xEc3aD4b2C872602F648F65B73a00fD3f45DCA082</code></td></tr>
+  <tr><td>LeverageRouter</td><td><code>0xB359c6a4b7A07f4944438d8e5d2FeC9e8E4aaCBc</code></td></tr>
   <tr><td>PoolManager (canonical)</td><td><code>0x00B036B58a818B1BC34d502D3fE730Db729e62AC</code></td></tr>
 </table></div>
 

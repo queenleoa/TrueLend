@@ -252,7 +252,7 @@ contract PeripheryTest is Test, Deployers {
         uint256 t0Before = token0.balanceOf(alice);
         vm.prank(alice);
         router.closeLeveraged(
-            LeverageRouter.CloseParams({key: poolKey, positionId: id, sqrtPriceLimitX96: 0})
+            LeverageRouter.CloseParams({key: poolKey, positionId: id, sqrtPriceLimitX96: 0, maxCollateralIn: 0})
         );
 
         assertEq(hook.getPosition(id).borrower, address(0), "position closed");
@@ -300,6 +300,65 @@ contract PeripheryTest is Test, Deployers {
         vm.prank(keeper);
         hook.poke(poolKey);
         assertLt(hook.getPosition(id).collateral, pos.collateral, "chunk decay reduces the levered position");
+    }
+
+    /// The share-rounding hazard: repaying exactly debtOf can burn one share too
+    /// few (vault floors assets·WAD/index), leaving the position open while the
+    /// buy-back still charges the trader. The router over-flashes by one wei and
+    /// hard-requires closure; after months of accrued interest at an odd index,
+    /// the close must still be exact — position gone, vault clear, router empty.
+    function test_router_close_afterInterestAccrual_closesExactly() public {
+        vm.prank(alice);
+        bytes32 id = router.openLeveraged(
+            LeverageRouter.OpenParams({
+                key: poolKey,
+                collateralIs0: true,
+                margin: 100e18,
+                flashBorrow: 395e18,
+                ltBps: 9500,
+                minCollateralOut: 380e18,
+                sqrtPriceLimitX96: 0
+            })
+        );
+
+        // push vault1 utilization high enough that the rate is nonzero, so the
+        // borrow index actually moves off WAD (dust utilization floors to 0 bps)
+        token0.mint(alice, 400_000e18);
+        vm.prank(alice);
+        hook.open(poolKey, true, 400_000e18, 150_000e18, 9000, alice);
+
+        skip(91 days + 12_345 seconds); // odd index: floor-rounding territory
+        assertGt(hook.debtOf(id), 395e18, "interest accrued");
+
+        vm.prank(alice);
+        router.closeLeveraged(
+            LeverageRouter.CloseParams({key: poolKey, positionId: id, sqrtPriceLimitX96: 0, maxCollateralIn: 450e18})
+        );
+
+        assertEq(hook.getPosition(id).borrower, address(0), "closed despite rounding");
+        assertEq(hook.debtOf(id), 0, "no dust share survives on the closed position");
+        assertEq(token0.balanceOf(address(router)), 0, "router holds nothing");
+        assertEq(token1.balanceOf(address(router)), 0, "router holds nothing");
+    }
+
+    function test_router_close_maxCollateralInGuard() public {
+        vm.prank(alice);
+        bytes32 id = router.openLeveraged(
+            LeverageRouter.OpenParams({
+                key: poolKey,
+                collateralIs0: true,
+                margin: 100e18,
+                flashBorrow: 395e18,
+                ltBps: 9500,
+                minCollateralOut: 380e18,
+                sqrtPriceLimitX96: 0
+            })
+        );
+        vm.prank(alice);
+        vm.expectRevert(LeverageRouter.TooMuchCollateralForBuyback.selector);
+        router.closeLeveraged(
+            LeverageRouter.CloseParams({key: poolKey, positionId: id, sqrtPriceLimitX96: 0, maxCollateralIn: 1})
+        );
     }
 
     function test_router_slippageGuard() public {

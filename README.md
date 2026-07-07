@@ -46,7 +46,7 @@ lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueL
 ```bash
 git clone --recursive <repo>
 forge build
-forge test          # 94 tests: unit + fuzz (libraries, vault), integration
+forge test          # 97 tests: unit + fuzz (libraries, vault), integration
                     # scenarios (full liquidation lifecycle), native-ETH pools,
                     # periphery (lens + leverage router), invariants
 ```
@@ -68,9 +68,9 @@ Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` fla
 | Unichain Sepolia (1301) | TrueLendHook | [`0xa731511a83D523A1df04e988873725BEE7cA90c0`](https://sepolia.uniscan.xyz/address/0xa731511a83D523A1df04e988873725BEE7cA90c0) |
 | Unichain Sepolia (1301) | VaultFactory | `0x2aAF432336Ea0D8b91398D32D0898317EfB6b420` |
 | Unichain Sepolia (1301) | TrueLendLens | `0xa8ed6128aD792485F6F5E9490C3dE630870e0cF4` |
-| Unichain Sepolia (1301) | LeverageRouter | `0xEc3aD4b2C872602F648F65B73a00fD3f45DCA082` |
+| Unichain Sepolia (1301) | LeverageRouter | `0xB359c6a4b7A07f4944438d8e5d2FeC9e8E4aaCBc` |
 | Unichain Sepolia (1301) | PoolManager (canonical) | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
 
 ## Status & roadmap
 
-Working v2 with full test coverage of the mechanism; deployed to testnet; internally audited (three findings — forceClose reward accounting, a trigger-tick registration cap, config validation — fixed with regression tests), not yet externally audited. The parameter model is calibrated from live data ([notebooks/calibrate.py](notebooks/calibrate.py)) and validated by historical replay of the May '21, LUNA, FTX, USDC-depeg, Aug '24 and Feb '25 weeks with walk-forward acceptance ([notebooks/BACKTEST.md](notebooks/BACKTEST.md)). Next: per-position size caps against measured in-range depth (the backtest's main finding for long-tail listings), per-block borrow caps, aggregate tick-region exposure caps, external audit.
+Working v2 with full test coverage of the mechanism; deployed to testnet; internally audited twice (core: forceClose reward accounting, a trigger-tick registration cap, config validation; periphery: a share-rounding hazard in the LeverageRouter's close that could strand a dust-debt position while still charging the trader — fixed with a one-wei over-flash, a closure guard, and a `maxCollateralIn` bound; all with regression tests), not yet externally audited. The parameter model is calibrated from live data ([notebooks/calibrate.py](notebooks/calibrate.py)) and validated by historical replay of the May '21, LUNA, FTX, USDC-depeg, Aug '24 and Feb '25 weeks with walk-forward acceptance ([notebooks/BACKTEST.md](notebooks/BACKTEST.md)). Next: per-position size caps against measured in-range depth (the backtest's main finding for long-tail listings), per-block borrow caps, aggregate tick-region exposure caps, external audit.

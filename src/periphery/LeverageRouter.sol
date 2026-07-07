@@ -51,6 +51,8 @@ contract LeverageRouter is IUnlockCallback {
 
     error NotPoolManager();
     error TooLittleCollateralFromSwap();
+    error TooMuchCollateralForBuyback();
+    error PositionNotClosed();
     error NativeValueMismatch();
 
     struct OpenParams {
@@ -67,6 +69,7 @@ contract LeverageRouter is IUnlockCallback {
         PoolKey key;
         bytes32 positionId;
         uint160 sqrtPriceLimitX96; // 0 = unbounded (buying debt back)
+        uint256 maxCollateralIn; // slippage guard on the buy-back; 0 = unlimited
     }
 
     constructor(IPoolManager _poolManager, TrueLendHook _hook, address _weth) {
@@ -159,27 +162,35 @@ contract LeverageRouter is IUnlockCallback {
         TrueLendHook.Position memory pos = hook.getPosition(p.positionId);
         Currency collCur = pos.collateralIs0 ? p.key.currency0 : p.key.currency1;
         Currency debtCur = pos.collateralIs0 ? p.key.currency1 : p.key.currency0;
-        uint256 debt = hook.debtOf(p.positionId);
 
-        // 1. flash the exact debt and repay in full; the hook pays remaining
-        //    collateral directly to the trader (WETH on native pools)
-        debtCur.take(poolManager, address(this), debt, false);
+        // 1. flash ONE WEI MORE than the live debt and repay with it. The vault
+        //    burns floor(assets·WAD/index) shares, so repaying the exact debt can
+        //    leave one dust share — position open, collateral never returned to
+        //    the trader, buy-back still charged. (debt+1)·WAD/index strictly
+        //    exceeds the share count, so the burn caps at ALL shares; the vault
+        //    refunds whatever the extra wei didn't consume.
+        uint256 flashDebt = hook.debtOf(p.positionId) + 1;
+        ERC20 debtAsset = _asset(debtCur);
+        debtCur.take(poolManager, address(this), flashDebt, false);
         if (debtCur.isAddressZero()) {
-            // raw ETH from the manager: repay through the hook's payable path
-            hook.repay{value: debt}(p.positionId, debt);
+            // raw ETH from the manager: repay through the hook's payable path;
+            // the refund arrives as WETH per the protocol's payout convention
+            hook.repay{value: flashDebt}(p.positionId, flashDebt);
         } else {
-            ERC20 debtAsset = _asset(debtCur);
-            debtAsset.safeApprove(address(hook), debt);
-            hook.repay(p.positionId, debt);
+            debtAsset.safeApprove(address(hook), flashDebt);
+            hook.repay(p.positionId, flashDebt);
         }
+        if (hook.getPosition(p.positionId).borrower != address(0)) revert PositionNotClosed();
+        uint256 leftover = debtAsset.balanceOf(address(this)); // vault refund, ≤ 1 wei + rounding
+        uint256 used = flashDebt - leftover;
 
-        // 2. buy the debt back: exact-output swap collateral -> debt
+        // 2. buy back exactly what the repayment consumed
         bool zeroForOne = pos.collateralIs0;
         BalanceDelta delta = poolManager.swap(
             p.key,
             SwapParams({
                 zeroForOne: zeroForOne,
-                amountSpecified: int256(debt), // exact output of the debt token
+                amountSpecified: int256(used), // exact output of the debt token
                 sqrtPriceLimitX96: p.sqrtPriceLimitX96 != 0
                     ? p.sqrtPriceLimitX96
                     : (zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1)
@@ -187,8 +198,15 @@ contract LeverageRouter is IUnlockCallback {
             ""
         );
         uint256 collNeeded = uint256(uint128(-(zeroForOne ? delta.amount0() : delta.amount1())));
+        if (p.maxCollateralIn != 0 && collNeeded > p.maxCollateralIn) revert TooMuchCollateralForBuyback();
 
-        // 3. pull exactly that much collateral back from the trader and settle
+        // 3. settle: the refunded leftover closes the flash gap (flashDebt =
+        //    used + leftover), and the trader supplies only the buy-back cost —
+        //    the router ends every close with zero balances
+        if (leftover > 0) {
+            if (debtCur.isAddressZero()) IWETH9(WETH).withdraw(leftover);
+            debtCur.settle(poolManager, address(this), leftover, false);
+        }
         _asset(collCur).safeTransferFrom(trader, address(this), collNeeded);
         if (collCur.isAddressZero()) IWETH9(WETH).withdraw(collNeeded);
         collCur.settle(poolManager, address(this), collNeeded, false);
