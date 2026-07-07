@@ -34,7 +34,7 @@ lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueL
 | [`TrueLendHook`](src/TrueLendHook.sol) | hook + lending core; one instance serves many pools — initializing any pool with this hook (ERC-20 pairs and native-ETH pools, the latter WETH-bridged at the hook boundary) makes it a lending market |
 | [`LendingVault`](src/LendingVault.sol) | per-currency lender vault: shares, borrow index, kinked IRM (kink 80%, hard cap 90%), 10% reserve factor |
 | [`VaultFactory`](src/VaultFactory.sol) | deploys the two vaults per pool at initialization |
-| [`libraries/LiqRangeMath`](src/libraries/LiqRangeMath.sol) | decimals-safe Q96 liquidation-range placement, both borrow directions |
+| [`libraries/LiqRangeMath`](src/libraries/LiqRangeMath.sol) | decimals-safe Q96 liquidation-range placement (both borrow directions), open-LTV check, force-close eligibility |
 | [`libraries/ChunkMath`](src/libraries/ChunkMath.sol) | the pacing formula (time × depth × pressure, clamped) |
 | [`libraries/TruncatedOracle`](src/libraries/TruncatedOracle.sol) | ±9,116-tick truncation, median-of-9, widen-only extremes, bootstrap gate |
 | [`libraries/TriggerIndex`](src/libraries/TriggerIndex.sol) | tick bitmap so `afterSwap` only touches positions whose boundaries were crossed |

@@ -602,7 +602,7 @@
     </g>
   </svg>
   </div>
-  <figcaption><b>Figure 5.</b> System architecture. One hook instance serves any number of pools; initializing an ERC-20/ERC-20 pool with the hook automatically deploys its two vaults and makes it a lending market.</figcaption>
+  <figcaption><b>Figure 5.</b> System architecture. One hook instance serves any number of pools; initializing a pool with the hook — an ERC-20 pair or a native-ETH pool, the latter WETH-bridged at the hook boundary — automatically deploys its two vaults and makes it a lending market.</figcaption>
 </figure>
 
 <h3>4.4 &nbsp;Price integrity without an oracle</h3>
@@ -685,7 +685,7 @@
   <span class="fnote">s = chunk slippage &amp; fees · π = penalty share · i(T) = interest over the episode · μ = adverse drift at volatility σ</span>
 </div>
 
-<p>Faster pacing shrinks <var>μ</var> but raises <var>s</var>; wider ranges lower <var>s</var> per tick but lengthen <var>T</var>. Sweeping this tradeoff against historical volatility, per pool-depth tier, is the protocol's principal open parameterization exercise — analogous to LLAMMA's empirically measured soft-liquidation loss curve.</p>
+<p>Faster pacing shrinks <var>μ</var> but raises <var>s</var>; wider ranges lower <var>s</var> per tick but lengthen <var>T</var>. This tradeoff has been swept per pool-depth tier (PARAMETERS.md; results in notebooks/RESULTS.md): Monte-Carlo acceptance yields LT<sub>max</sub> of 99% (stable), 95% (major) and 88–90% (long-tail), and a historical replay of the six major crash weeks since 2021 through the same episode engine — with walk-forward re-acceptance on trailing data only — validates the major tier ex-ante and ex-post, shows stable LT&nbsp;99 to be exactly a no-depeg bet (a multi-percent depeg gaps through a 1% cushion; depeg-aware sizing is ≈96.5%), and bounds long-tail listings by position size against measured book depth rather than by LT (notebooks/BACKTEST.md). Borrower cost in deep replayed episodes (73 bps median) lands on the correct side of LLAMMA's empirically measured soft-liquidation loss curve (≈100 bps).</p>
 
 <h2><span class="no">6</span>Security considerations</h2>
 
@@ -751,7 +751,7 @@
 
 <h2><span class="no">10</span>Implementation and status</h2>
 
-<p>Six contracts, ~1,600 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,444 bytes — 132 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, and linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>. Any ERC-20/ERC-20 pool initialized with the hook becomes a lending market automatically. 86 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios plus 4 native-ETH pool scenarios (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
+<p>Six contracts, ~1,600 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,444 bytes — 132 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, and linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>. Any pool initialized with the hook — ERC-20 pairs or native-ETH pools, the latter WETH-bridged at the hook boundary — becomes a lending market automatically. 86 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios plus 4 native-ETH pool scenarios (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
 
 <p><strong>Deployment — Unichain Sepolia (1301):</strong></p>
 <div class="tablewrap"><table>
@@ -763,7 +763,7 @@
 
 <h2><span class="no">11</span>Limitations and future work</h2>
 
-<p>The protocol is not audited. Chunk-pacing constants, the penalty curve, and per-pool LT tiers are engineering defaults pending the volatility-sweep parameterization of §5.3. Decay liveness in fully quiescent markets depends on <code>poke</code> being called (by anyone); per-block borrow caps and aggregate per-tick-region exposure caps are designed but deferred. Lender-side risk is a genuine short-tail position and must be communicated as such — the waterfall is declared precisely so that it can be priced.</p>
+<p>The protocol has passed an internal audit (three findings — force-close reward accounting, a trigger-tick registration cap, configuration validation — fixed with regression tests) but not an external one. Chunk-pacing constants, the penalty curve, and per-pool LT tiers are set by the §5.3 parameterization, live-calibrated and validated against historical replay; the arbitrage-refill constant κ still awaits trade-level calibration. Decay liveness in fully quiescent markets depends on <code>poke</code> being called (by anyone); per-block borrow caps and aggregate per-tick-region exposure caps are designed but deferred. Lender-side risk is a genuine short-tail position and must be communicated as such — the waterfall is declared precisely so that it can be priced.</p>
 
 <hr class="footer-rule"/>
 

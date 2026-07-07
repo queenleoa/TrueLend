@@ -207,9 +207,9 @@ The closed forms above make three simplifications the simulation removes: the mu
 
 ### 7.1 Simulator
 
-1. **Paths**: jump-diffusion (§3.1) at 1-block (12 s / 1 s for L2) resolution, per tier calibration; 10,000 paths per grid point; antithetic variates for variance reduction.
+1. **Paths**: jump-diffusion (§3.1) at 1-block (12 s) resolution, per tier calibration; 4,000 antithetic paths per grid point (diffusion normals and jump sizes mirrored, jump times shared — the raw Monte-Carlo error this buys is adequate for tiering; boundary cells are reported as bands where a handful of tail paths decide them).
 2. **Engine replica**: a faithful Python port of `ChunkMath` + range logic: entry/exit detection, per-interval chunk sizing with live depth and pressure, penalty accrual with time-in-liquidation, pause on exit, resume on re-entry, `forceClose` at range exhaustion / health breach, waterfall on shortfall. (Port, not reimplementation-from-memory: cross-check against the Solidity unit-test vectors so the two cannot drift apart.)
-3. **Market microstructure**: pool depth constant per run (swept as a parameter); arbitrage refill factor $\kappa \in \{0.5, 0.9, 1.0\}$ applied between intervals; organic volume irrelevant except as it triggers `afterSwap` — model chunk execution as available every $\tau$ (poke-backstopped), plus a "quiet market" variant with execution gaps of 5–30 min to stress the catch-up multiplier.
+3. **Market microstructure**: pool depth constant per run (swept as a parameter); arbitrage refill factor $\kappa \in \{0.5, 0.9, 1.0\}$ applied between intervals (the v1 runs hold $\kappa = 0.9$ — sweeping refill honestly awaits trade-level calibration; see RESULTS.md limitations); organic volume irrelevant except as it triggers `afterSwap` — model chunk execution as available every $\tau$ (poke-backstopped), plus a "quiet market" variant with execution gaps of 5–30 min to stress the catch-up multiplier.
 4. **Episode bootstrap**: positions initialized at LTV = 95% of candidate LT (the headroom boundary — worst legal entry), price started at the range boundary (episodes begin at entry by definition).
 
 ### 7.2 Sweep grid
