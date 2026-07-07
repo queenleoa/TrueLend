@@ -9,6 +9,13 @@ import {BitMath} from "v4-core/libraries/BitMath.sol";
 /// Ticks must be pre-aligned to the pool's tickSpacing. Storage per pool:
 /// a word-bitmap over compressed ticks plus a position list per trigger tick.
 library TriggerIndex {
+    /// hard cap on ids sharing one trigger tick, equal to the hook's per-walk
+    /// refresh budget (MAX_REFRESHES_PER_WALK): a tick hosting more ids than one
+    /// walk can refresh would stall trigger processing at that tick forever
+    uint256 internal constant MAX_IDS_PER_TICK = 32;
+
+    error TickCrowded();
+
     struct State {
         mapping(int16 => uint256) bitmap; // wordPos -> bits over compressed ticks
         mapping(int24 => bytes32[]) idsAt; // trigger tick -> position ids
@@ -20,6 +27,7 @@ library TriggerIndex {
     }
 
     function register(State storage self, int24 tick, int24 spacing, bytes32 id) public {
+        if (self.idsAt[tick].length >= MAX_IDS_PER_TICK) revert TickCrowded();
         int24 compressed = tick / spacing; // tick is aligned; exact division
         self.idsAt[tick].push(id);
         (int16 wordPos, uint8 bitPos) = _split(compressed);

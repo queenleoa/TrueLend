@@ -10,7 +10,7 @@ Because selling is rate-limited (≈1% of a position per minute, scaled by range
 
 - **[DESIGN.md](DESIGN.md)** — the full specification: a loan walked end-to-end, architecture, the chunk engine, parameters.
 - **[RESEARCH.md](RESEARCH.md)** — why chunked *active* conversion is the only AMM-native way to do this (passive "inverse range orders" are provably impossible on v4), prior art (LLAMMA, Ajna, Ammalgam, …), manipulation economics, and the math.
-- **[PARAMETERS.md](PARAMETERS.md)** — the parameter-modelling methodology: risk model, derivations, first-cut LT tiers, Monte-Carlo specification.
+- **[PARAMETERS.md](PARAMETERS.md)** — the parameter-modelling methodology: risk model, derivations, first-cut LT tiers, Monte-Carlo specification. Results: [notebooks/RESULTS.md](notebooks/RESULTS.md); live calibration and the historical-replay backtest across six historic crash weeks: [notebooks/BACKTEST.md](notebooks/BACKTEST.md).
 - **[WHITEPAPER.md](WHITEPAPER.md)** / [docs/TrueLend-Whitepaper.pdf](docs/TrueLend-Whitepaper.pdf) — the formal paper.
 
 ## How it works
@@ -44,8 +44,8 @@ lenders ──deposit──► LendingVault0/1 ──borrow/repay──► TrueL
 ```bash
 git clone --recursive <repo>
 forge build
-forge test          # 78 tests: unit + fuzz (libraries, vault), integration
-                    # scenarios (full liquidation lifecycle), invariants
+forge test          # 86 tests: unit + fuzz (libraries, vault), integration
+                    # scenarios (full liquidation lifecycle), native-ETH pools, invariants
 ```
 
 Test map: [`test/libraries/`](test/libraries/) (fuzzed math + oracle), [`test/LendingVault.t.sol`](test/LendingVault.t.sol) (IRM, accrual, write-off waterfall), [`test/TrueLendHook.t.sol`](test/TrueLendHook.t.sol) (open/repay/decay/pause/resume/forceClose, manipulation defense, drained-pool safety, 6-vs-18-decimals pair), [`test/TrueLendInvariants.t.sol`](test/TrueLendInvariants.t.sol) (conservation under random action sequences).
@@ -62,10 +62,10 @@ Mines a hook address carrying the `afterInitialize | beforeSwap | afterSwap` fla
 
 | Network | Contract | Address |
 |---|---|---|
-| Unichain Sepolia (1301) | TrueLendHook | [`0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0`](https://sepolia.uniscan.xyz/address/0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0) |
-| Unichain Sepolia (1301) | VaultFactory | `0xb95f855B1252c51A3AD167b3D1F5ab8B121107E6` |
+| Unichain Sepolia (1301) | TrueLendHook | [`0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0`](https://sepolia.uniscan.xyz/address/0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0) |
+| Unichain Sepolia (1301) | VaultFactory | `0x1C4E9f5b89e096c98592a304f4aF8DDc529fA057` |
 | Unichain Sepolia (1301) | PoolManager (canonical) | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
 
 ## Status & roadmap
 
-Working v2 with full test coverage of the mechanism; deployed to testnet; not audited. Next: the parameter-modelling notebook per [PARAMETERS.md](PARAMETERS.md), per-block borrow caps, aggregate tick-region exposure caps, audit.
+Working v2 with full test coverage of the mechanism; deployed to testnet; internally audited (three findings — forceClose reward accounting, a trigger-tick registration cap, config validation — fixed with regression tests), not yet externally audited. The parameter model is calibrated from live data ([notebooks/calibrate.py](notebooks/calibrate.py)) and validated by historical replay of the May '21, LUNA, FTX, USDC-depeg, Aug '24 and Feb '25 weeks with walk-forward acceptance ([notebooks/BACKTEST.md](notebooks/BACKTEST.md)). Next: per-position size caps against measured in-range depth (the backtest's main finding for long-tail listings), per-block borrow caps, aggregate tick-region exposure caps, external audit.

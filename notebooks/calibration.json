@@ -1,0 +1,145 @@
+{
+  "generated_at": "2026-07-06T23:11:08+00:00",
+  "history_since": "2020-11-01",
+  "kappa": {
+    "value": 0.9,
+    "source": "static \u2014 arbitrage-refill estimation needs trade-level data; not yet calibrated"
+  },
+  "tiers": {
+    "stable": {
+      "cal": {
+        "sigma": 0.3775717207885617,
+        "lam": 29.862983763466705,
+        "muJ": -0.001990898194454164,
+        "sJ": 0.008272901832002418,
+        "fee": 0.0001,
+        "depth": 92247.29597355235
+      },
+      "detail": {
+        "vol": {
+          "sigma_p99": 0.3775717207885617,
+          "sigma_med": 0.009363041339264268,
+          "n_windows": 45041
+        },
+        "jumps": {
+          "lam": 29.862983763466705,
+          "muJ": -0.001990898194454164,
+          "sJ": 0.008272901832002418,
+          "muJ_signed": -0.00028111690946197837,
+          "sJ_signed": 0.008504443169652223,
+          "n_jumps": 156
+        },
+        "depth": {
+          "pool": "USDC/USDT 1bp 0.01%",
+          "rpc": "https://ethereum-rpc.publicnode.com",
+          "price_1per0": 1.0004983271459436,
+          "depth_tokens": 9224729597.355234,
+          "depth_usd": 9224729597.355234,
+          "depth_units_100k": 92247.29597355235
+        }
+      },
+      "static": {
+        "sigma": 0.02,
+        "lam": 2,
+        "muJ": -0.005,
+        "sJ": 0.003,
+        "fee": 0.0005,
+        "depth": 100.0
+      },
+      "lt_max_closed_form": {
+        "static": 0.99,
+        "calibrated": 0.965
+      }
+    },
+    "major": {
+      "cal": {
+        "sigma": 1.8222703530124496,
+        "lam": 72.36031835356539,
+        "muJ": -0.03462251850515664,
+        "sJ": 0.017297298248136934,
+        "fee": 0.0005,
+        "depth": 449.44664139682857
+      },
+      "detail": {
+        "vol": {
+          "sigma_p99": 1.8222703530124496,
+          "sigma_med": 0.683563624397372,
+          "n_windows": 49036
+        },
+        "jumps": {
+          "lam": 72.36031835356539,
+          "muJ": -0.03462251850515664,
+          "sJ": 0.017297298248136934,
+          "muJ_signed": -0.006361393778533309,
+          "sJ_signed": 0.03817653708129318,
+          "n_jumps": 411
+        },
+        "depth": {
+          "pool": "USDC/WETH 5bp 0.05%",
+          "rpc": "https://ethereum-rpc.publicnode.com",
+          "price_1per0": 0.0005536088472616782,
+          "depth_tokens": 24881.76370493311,
+          "depth_usd": 44944664.13968286,
+          "depth_units_100k": 449.44664139682857
+        }
+      },
+      "static": {
+        "sigma": 0.8,
+        "lam": 20,
+        "muJ": -0.08,
+        "sJ": 0.06,
+        "fee": 0.003,
+        "depth": 20.0
+      },
+      "lt_max_closed_form": {
+        "static": 0.94,
+        "calibrated": 0.905
+      }
+    },
+    "longtail": {
+      "cal": {
+        "sigma": 2.8597127518994854,
+        "lam": 64.60176991150443,
+        "muJ": -0.06381619370634901,
+        "sJ": 0.03180607981573236,
+        "fee": 0.003,
+        "depth": 0.1438754793550184
+      },
+      "detail": {
+        "vol": {
+          "sigma_p99": 2.8597127518994854,
+          "sigma_med": 1.2411375106367524,
+          "n_windows": 27078
+        },
+        "jumps": {
+          "lam": 64.60176991150443,
+          "muJ": -0.06381619370634901,
+          "sJ": 0.03180607981573236,
+          "muJ_signed": 0.009989621966068098,
+          "sJ_signed": 0.07059986363574683,
+          "n_jumps": 205
+        },
+        "depth": {
+          "pool": "PEPE/WETH 0.30%",
+          "rpc": "https://ethereum-rpc.publicnode.com",
+          "price_1per0": 1.5205367774379186e-09,
+          "depth_tokens": 5238330269.732995,
+          "depth_usd": 14387.547935501841,
+          "depth_units_100k": 0.1438754793550184
+        }
+      },
+      "static": {
+        "sigma": 1.5,
+        "lam": 60,
+        "muJ": -0.15,
+        "sJ": 0.1,
+        "fee": 0.01,
+        "depth": 5.0
+      },
+      "lt_max_closed_form": {
+        "static": 0.91,
+        "calibrated": 0.87
+      }
+    }
+  }
+}

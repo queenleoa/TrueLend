@@ -146,12 +146,24 @@ flowchart TB
     subgraph test
         T1["libraries/* — fuzzed unit tests"]
         T2["LendingVault.t.sol"]
-        T3["TrueLendHook.t.sol — 24 scenarios"]
+        T3["TrueLendHook.t.sol — 28 scenarios"]
         T4["TrueLendInvariants.t.sol — randomized"]
     end
     HOOK --> VAULT & LRM & CM & TO & TI
     HOOK --> FACT
 ```
+
+### 3.1 The core/periphery boundary
+
+The rule that decides where code lives: **core is anything that must run inside PoolManager callbacks or that custodies funds; periphery is anything that only reads state or rearranges who signs.** Two forces make the core's minimality non-negotiable. A hook's address is baked into every pool key that uses it, so the core is effectively immutable per market — redeploying it strands the old pools rather than upgrading them. And the hook sits 132 bytes under the EIP-170 bytecode limit (24,444 of 24,576), which is why the pure math already lives in **linked external libraries** (`LiqRangeMath`, `ChunkMath`, `TruncatedOracle`, `TriggerIndex`): their bytecode is deployed once and shared by delegatecall, outside the hook's own limit — and, usefully, those library singletons are reusable on-chain by any future contract.
+
+What is core today stays core: the hook (callbacks, chunk engine, trigger walking, oracle writes, collateral custody, WETH bridging), the vaults and their factory, and the libraries. Nothing currently in the contracts is a periphery candidate — every entrypoint either runs the engine (`poke`, `forceClose`), mutates custody (`open`, `repay`), or serves state that tests and integrators read directly.
+
+Periphery is where *growth* goes, in this order:
+
+1. **TrueLendLens** (first, zero-risk): a view aggregator — health factor, current effective penalty, force-close eligibility with reason, chunk-size preview at the current tick, position enumeration per borrower. Everything it needs is reconstructable from the hook's public views and pool state; it custodies nothing, so it can be replaced weekly without touching a deployed market. It also becomes the pressure valve for the byte budget: any future view the hook is tempted to grow lives there instead.
+2. **TrueLendRouter** (when UX demands it): permit2 approvals, batched open/repay, exact-debt repayment quotes, wrap/unwrap preferences on payouts. This is the one periphery that needs a core accommodation — an `onBehalfOf` owner parameter on `open`, so positions belong to the signer rather than the router. That single argument is the only core change periphery growth should ever require, and it is deliberately deferred until a router is actually wanted.
+3. **Keepers** are off-chain periphery already: `poke()` is their incentive-compatible entrypoint, paid from the penalty flow.
 
 ---
 
@@ -278,7 +290,7 @@ Who controls each number, with defaults. Entries marked ★ are risk parameters 
 
 ## 8. Build status
 
-Implemented, green, and deployed: 78 tests (fuzzed library units, vault accounting, 24 lifecycle scenarios, randomized invariants), gas snapshot checked in, deploy script (address mining + CREATE2 + linked libraries) verified end-to-end, live on Unichain Sepolia — addresses in the [README](README.md).
+Implemented, green, and deployed: 86 tests (fuzzed library units, vault accounting, 28 lifecycle scenarios, 4 native-ETH pool scenarios, randomized invariants), gas snapshot checked in, deploy script (address mining + CREATE2 + linked libraries) verified end-to-end, live on Unichain Sepolia — addresses in the [README](README.md).
 
 **Invariants held under randomized action sequences:** the hook holds exactly the sum of open positions' collateral (nothing strands, nothing leaks); position debt shares reconcile with vault totals; vault balances always cover tracked reserves; utilization never exceeds its cap; lender value falls below principal only through the declared waterfall.
 

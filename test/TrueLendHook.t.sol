@@ -24,6 +24,7 @@ import {TrueLendHook} from "../src/TrueLendHook.sol";
 import {LendingVault} from "../src/LendingVault.sol";
 import {VaultFactory} from "../src/VaultFactory.sol";
 import {LiqRangeMath} from "../src/libraries/LiqRangeMath.sol";
+import {TriggerIndex} from "../src/libraries/TriggerIndex.sol";
 
 contract TrueLendHookTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
@@ -611,6 +612,35 @@ contract TrueLendHookTest is Test, Deployers {
         hook.forceClose(id);
     }
 
+    /// The forceClose caller reward must be carved out of the penalty (like the
+    /// chunk path), never charged on top of it. With penalty 45 bps and reward
+    /// 10 bps of proceeds, the borrower's total charge is 45 bps — so the
+    /// surplus returned equals proceeds·(1 − 45 bps) − debt, where proceeds is
+    /// recovered exactly from the keeper's 10 bps reward.
+    function test_forceClose_rewardCarvedFromPenalty() public {
+        bytes32 id = _openDefault();
+        skip(181 days); // expiry eligibility at a healthy price
+        uint256 debt = hook.debtOf(id);
+
+        uint256 keeperBefore = token1.balanceOf(keeper);
+        uint256 aliceBefore = token1.balanceOf(alice);
+        vm.prank(keeper);
+        hook.forceClose(id);
+
+        uint256 reward = token1.balanceOf(keeper) - keeperBefore;
+        uint256 surplus = token1.balanceOf(alice) - aliceBefore;
+        assertGt(reward, 0, "keeper paid");
+
+        // reward = proceeds · rewardBps(10)/1e4  =>  proceeds = reward · 1e3
+        uint256 proceeds = reward * 1000;
+        // borrower charge = full penalty only: 50 · 0.90 = 45 bps of proceeds
+        uint256 expectedSurplus = proceeds - (proceeds * 45) / 10_000 - debt;
+        // pre-fix behavior charged penalty + reward (55 bps): off by 10 bps of
+        // proceeds ≈ 0.1e18 here, far outside this tolerance
+        assertApproxEqAbs(surplus, expectedSurplus, 0.001e18, "reward came out of the penalty");
+        assertEq(vault1.totalBorrowShares(), 0, "debt cleared");
+    }
+
     // ------------------------------------------------------------------ decimals
 
     function test_decimals_usdcWethPair() public {
@@ -709,5 +739,38 @@ contract TrueLendHookTest is Test, Deployers {
         vm.prank(alice);
         vm.expectRevert(TrueLendHook.NotOwner.selector);
         hook.setConfig(poolId, cfg);
+    }
+
+    /// A zero pacing field would stall every liquidation in the pool (chunk size
+    /// divides by targetChunks; interval/timeCapX of zero produce zero chunks).
+    function test_config_rejectsLiquidationBrickingValues() public {
+        TrueLendHook.Config memory cfg = _cfg();
+        cfg.targetChunks = 0;
+        vm.expectRevert(TrueLendHook.BadConfig.selector);
+        hook.setConfig(poolId, cfg);
+
+        cfg = _cfg();
+        cfg.chunkInterval = 0;
+        vm.expectRevert(TrueLendHook.BadConfig.selector);
+        hook.setConfig(poolId, cfg);
+
+        cfg = _cfg();
+        cfg.maxLtBps = 9990; // gap too thin for penalty/buffer arithmetic
+        vm.expectRevert(TrueLendHook.BadConfig.selector);
+        hook.setConfig(poolId, cfg);
+
+        hook.setConfig(poolId, _cfg()); // defaults remain valid
+    }
+
+    /// More positions sharing one trigger tick than a walk can refresh (32) would
+    /// stall trigger processing at that tick forever; registration is capped.
+    function test_open_revertsWhenTriggerTickCrowded() public {
+        for (uint256 i = 0; i < 32; i++) {
+            vm.prank(alice);
+            hook.open(poolKey, true, 100e18, 50e18, 9000); // identical range every time
+        }
+        vm.prank(alice);
+        vm.expectRevert(TriggerIndex.TickCrowded.selector);
+        hook.open(poolKey, true, 100e18, 50e18, 9000);
     }
 }

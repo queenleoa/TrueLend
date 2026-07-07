@@ -228,17 +228,19 @@ The closed forms above make three simplifications the simulation removes: the mu
 
 Per grid point, over all episodes: shortfall frequency and conditional severity (vs. $\varepsilon_1, \varepsilon_2$); exhaustion frequency (vs. $\varepsilon_3$); borrower cost distribution ($s + \pi$, median and 95th percentile); episode duration distribution; fraction of episodes ending in recovery (pause-out) vs. repayment vs. backstop. **A parameter set is accepted for a tier iff all three $\varepsilon$ constraints hold at that tier's 99th-percentile calibration, and is preferred among accepted sets by lowest median borrower cost.**
 
-### 7.4 Validation and calibration data
+### 7.4 Validation and calibration data — implemented
 
-- **External anchor**: LLAMMA's published soft-liquidation empirics (≈1% collateral loss for a 10%-below-threshold excursion held ~3 days; losses scaling with realized variance). Our simulated borrower cost for the analogous episode should land in the same order of magnitude — materially lower is a red flag (missing cost term), materially higher means pacing is too slow.
-- **Inputs**: per-pair realized vol series (exchange candles); tick-level pool depth snapshots from the target chain (the contract's own `_rangeDepthTokens` measure, sampled); L2 gas price history for §6.3.
-- **Sensitivity report**: tornado chart of $\mathrm{LT}_{max}$ against ±50% perturbation of each calibrated input — any input whose perturbation moves $\mathrm{LT}_{max}$ by more than one tier gets a conservative haircut in production values.
+- **External anchor**: LLAMMA's published soft-liquidation empirics (≈1% collateral loss for a 10%-below-threshold excursion held ~3 days; losses scaling with realized variance). Our replayed borrower cost for the analogous deep episodes lands at 73 bps median on the major tier — the same order of magnitude, on the correct side.
+- **Inputs** ✅ [`notebooks/calibrate.py`](notebooks/calibrate.py): per-pair realized vol (hourly exchange candles since 2020; 99th percentile of 30-day rolling windows), threshold-detected jumps reflected into the adverse direction (a pump is a crash for the short-side borrower), and one-sided in-range depth read live from the deepest Uniswap v3 mainnet pool per tier — the contract's own constant-liquidity measure. Output: [`notebooks/calibration.json`](notebooks/calibration.json), consumed by the closed forms, the simulator and the backtest through a common `cal=` override.
+- **Historical replay** ✅ [`notebooks/backtest.py`](notebooks/backtest.py): the six historic crash weeks plus calm controls, both pool orientations, replayed at the contract's own cadence through the same episode engine as the Monte-Carlo ([`notebooks/engine.py`](notebooks/engine.py)), with a trailing-180-day walk-forward re-acceptance at production parameters. Results and the three findings: [`notebooks/BACKTEST.md`](notebooks/BACKTEST.md).
+- **Sensitivity report** (remaining): tornado chart of $\mathrm{LT}_{max}$ against ±50% perturbation of each calibrated input; the walk-forward already exercises the volatility input across an order of magnitude.
 
 ### 7.5 Deliverables — status
 
-1. ✅ [`notebooks/parameters.py`](notebooks/parameters.py) / [`parameters.ipynb`](notebooks/parameters.ipynb) — calibration constants, closed-form first cuts (reproducing §4–6), the engine replica cross-checked against the Solidity test vectors, the simulator, the sweep, and figures. Results: [`notebooks/RESULTS.md`](notebooks/RESULTS.md), raw metrics in [`notebooks/results.json`](notebooks/results.json).
-2. ✅ Per-tier recommendations tabulated in RESULTS.md (JSON emission for `setConfig` wiring: next iteration, together with live calibration).
+1. ✅ [`notebooks/parameters.py`](notebooks/parameters.py) / [`parameters.ipynb`](notebooks/parameters.ipynb) — closed-form first cuts (reproducing §4–6), the engine replica cross-checked against the Solidity test vectors on every import ([`notebooks/engine.py`](notebooks/engine.py), shared verbatim with the backtest), the antithetic simulator, the sweep, and figures. Results: [`notebooks/RESULTS.md`](notebooks/RESULTS.md), raw metrics in [`notebooks/results.json`](notebooks/results.json).
+2. ✅ Per-tier recommendations tabulated in RESULTS.md.
 3. ✅ Simulated values beside the first cuts: see §8 below.
+4. ✅ Live calibration and historical-replay backtest with walk-forward validation: §7.4 above, results in [BACKTEST.md](notebooks/BACKTEST.md).
 
 **Two protocol changes the model forced** (both merged with regression tests): the reason-3 health buffer and the effective penalty are now capped per position at half and a quarter of the LT gap respectively — the fixed config values silently preempted or bankrupted any position with LT above ~98%. Details in RESULTS.md.
 
@@ -249,7 +251,8 @@ Per grid point, over all episodes: shortfall frequency and conditional severity 
 | Parameter | Stable tier | Major tier | Long-tail tier |
 |---|---|---|---|
 | $\mathrm{LT}_{max}$ — first cut | 99% | 94–95% (≈96% with faster pacing) | 89–90% |
-| $\mathrm{LT}_{max}$ — **simulated** | **99% ✓** (sf-freq 0.03%) | **95% ✓** (97% rejects at 3.1% freq) | **88–90%** (90% fails severity by 1.1pt via backstop-impact assumption) |
+| $\mathrm{LT}_{max}$ — **simulated** | **99% ✓** (sf-freq 0.03%) | **95% ✓** (97% rejects at 3.6% freq) | **88–90%** (90% fails only conditional severity) |
+| $\mathrm{LT}_{max}$ — **replayed** (BACKTEST.md) | 99% is a **no-depeg bet**; depeg-aware ≈ 96.5% | **95% ✓** ex-ante and ex-post across all six crash weeks | bounded by **position size vs measured depth**, not LT |
 | $N$ / $\tau$ | 100 / 60 s | **50 / 60 s** (halve the episode) | 100 / 60 s (impact-bound) |
 | Range width $w$ | 1,733 ticks may suffice | 3,466 ticks (√2) | ≥3,466; widen if jump fit demands |
 | Base penalty $p_0$ | 0.25% (episodes benign) | 0.5% | 0.75–1% (LPs carry more) |

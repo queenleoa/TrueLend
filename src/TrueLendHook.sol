@@ -156,6 +156,7 @@ contract TrueLendHook is BaseHook {
     error PositionNotActive();
     error NotEligibleForForceClose();
     error UnknownAction();
+    error BadConfig();
 
     modifier nonReentrant() {
         if (locked != 1) revert Reentrancy();
@@ -257,12 +258,9 @@ contract TrueLendHook is BaseHook {
         override
         returns (bytes4, int128)
     {
-        PoolId poolId = key.toId();
-        _walkTriggers(key, poolId);
         // no executor reward on the swap path: the hook only sees the router
         // address, not the end swapper, so a rebate would strand with routers
-        _processQueue(key, poolId, MAX_CHUNKS_PER_SWAP, address(0));
-        _walkTriggers(key, poolId); // chunks move the tick; pick up newly crossed triggers
+        _drive(key, key.toId(), MAX_CHUNKS_PER_SWAP, address(0));
         return (BaseHook.afterSwap.selector, 0);
     }
 
@@ -290,16 +288,16 @@ contract TrueLendHook is BaseHook {
         // 1. initial LTV at the manipulation-resistant, borrower-adverse price,
         //    with headroom below the chosen LT so interest accrual doesn't
         //    immediately erode the position into its range
-        {
-            int24 worstTick = oracles[poolId].borrowTick(spotTick, collateralIs0);
-            uint160 worstSqrtP = TickMath.getSqrtPriceAtTick(worstTick);
-            uint256 collValueInDebt = LiqRangeMath.convertAtSqrtPrice(collateralAmount, worstSqrtP, collateralIs0);
-            if (
-                collValueInDebt == 0
-                    || FullMath.mulDiv(borrowAmount, BPS * BPS, collValueInDebt)
-                        > uint256(ltBps) * OPEN_LTV_HEADROOM_BPS
-            ) revert LtvTooHigh();
-        }
+        if (
+            !LiqRangeMath.openLtvOk(
+                collateralAmount,
+                borrowAmount,
+                oracles[poolId].borrowTick(spotTick, collateralIs0),
+                collateralIs0,
+                ltBps,
+                OPEN_LTV_HEADROOM_BPS
+            )
+        ) revert LtvTooHigh();
 
         // 2. place the liquidation range
         (int24 tickStart, int24 tickEnd) = LiqRangeMath.liquidationRange(
@@ -327,6 +325,7 @@ contract TrueLendHook is BaseHook {
         if (debtShares > type(uint128).max) revert AmountTooLarge();
 
         positionId = keccak256(abi.encodePacked(msg.sender, PoolId.unwrap(poolId), positionNonce++));
+        uint40 expiry = uint40(block.timestamp + cfg.termSeconds);
         positions[positionId] = Position({
             borrower: msg.sender,
             poolId: poolId,
@@ -337,7 +336,7 @@ contract TrueLendHook is BaseHook {
             tickStart: tickStart,
             tickEnd: tickEnd,
             ltBps: ltBps,
-            expiry: uint40(block.timestamp + cfg.termSeconds),
+            expiry: expiry,
             lastChunkAt: 0,
             liqStartedAt: 0,
             timeInLiqAccrued: 0
@@ -346,16 +345,7 @@ contract TrueLendHook is BaseHook {
         triggers[poolId].register(tickEnd, key.tickSpacing, positionId);
 
         emit PositionOpened(
-            positionId,
-            msg.sender,
-            poolId,
-            collateralIs0,
-            collateralAmount,
-            borrowAmount,
-            ltBps,
-            tickStart,
-            tickEnd,
-            uint40(block.timestamp + cfg.termSeconds)
+            positionId, msg.sender, poolId, collateralIs0, collateralAmount, borrowAmount, ltBps, tickStart, tickEnd, expiry
         );
 
         // safety: opening straight into the range is prevented by the gap check,
@@ -417,9 +407,7 @@ contract TrueLendHook is BaseHook {
         PoolState storage pool = pools[poolId];
 
         if (action == ACTION_POKE) {
-            _walkTriggers(pool.key, poolId);
-            _processQueue(pool.key, poolId, MAX_CHUNKS_PER_POKE, caller); // poke incentive
-            _walkTriggers(pool.key, poolId);
+            _drive(pool.key, poolId, MAX_CHUNKS_PER_POKE, caller); // poke incentive
         } else if (action == ACTION_FORCE_CLOSE) {
             _executeForceClose(pool.key, positionId, caller);
         } else {
@@ -429,6 +417,13 @@ contract TrueLendHook is BaseHook {
     }
 
     // ------------------------------------------------------------------ trigger walking
+
+    /// walk crossed triggers, execute due chunks, walk again (chunks move the tick)
+    function _drive(PoolKey memory key, PoolId poolId, uint256 maxChunks, address rewardTo) internal {
+        _walkTriggers(key, poolId);
+        _processQueue(key, poolId, maxChunks, rewardTo);
+        _walkTriggers(key, poolId);
+    }
 
     function _walkTriggers(PoolKey memory key, PoolId poolId) internal {
         PoolState storage pool = pools[poolId];
@@ -665,13 +660,15 @@ contract TrueLendHook is BaseHook {
                 if (limitTick > TickMath.MAX_TICK) limitTick = TickMath.MAX_TICK - 1;
                 limit = TickMath.getSqrtPriceAtTick(limitTick);
             }
-            (uint256 consumed, uint256 proceeds, uint256 penalty,) =
-                _swapCollateral(key, pos, collateralToSell, _currentPenaltyBps(pos, cfg), limit, 0);
+            // the caller reward is carved out of the penalty inside _swapCollateral,
+            // exactly as on the chunk path: the borrower is never charged beyond
+            // the penalty itself
+            uint256 consumed;
+            uint256 proceeds;
+            uint256 penalty;
+            (consumed, proceeds, penalty, reward) =
+                _swapCollateral(key, pos, collateralToSell, _currentPenaltyBps(pos, cfg), limit, cfg.rewardBps);
             if (consumed < collateralToSell) pos.collateral = uint128(collateralToSell - consumed);
-
-            // caller reward comes out of the penalty flow, not the borrower's hide
-            reward = FullMath.mulDiv(proceeds, cfg.rewardBps, BPS);
-            if (reward > proceeds - penalty) reward = proceeds - penalty;
 
             LendingVault vault = _debtVault(pos);
             uint256 net = proceeds - penalty - reward;
@@ -698,25 +695,16 @@ contract TrueLendHook is BaseHook {
         Position storage pos = positions[positionId];
         if (pos.borrower == address(0)) return 0;
         (, int24 tick,,) = poolManager.getSlot0(pos.poolId);
-        if (LiqRangeMath.pastRange(pos.collateralIs0, tick, pos.tickEnd)) return 1;
-        if (block.timestamp > pos.expiry) return 2;
-
-        // health breach: at the CURRENT price, remaining collateral (after a
-        // buffer) no longer covers the debt — interest erosion or a partial
-        // gap-through has made waiting strictly worse for lenders. The buffer
-        // is capped at half the position's own LT gap: a fixed buffer wider
-        // than (1 - LT) would preempt the entire gradual range for high-LT
-        // positions, since a position enters its range at LTV = LT by
-        // definition (finding from the parameter model, PARAMETERS.md).
-        uint256 debt = _debtVault(pos).debtAssetsForShares(pos.debtShares);
-        uint256 collValue =
-            LiqRangeMath.convertAtSqrtPrice(pos.collateral, TickMath.getSqrtPriceAtTick(tick), pos.collateralIs0);
-        uint256 bufferBps = configs[pos.poolId].slippageBufferBps;
-        uint256 halfGap = (BPS - pos.ltBps) / 2;
-        if (bufferBps > halfGap) bufferBps = halfGap;
-        uint256 usable = FullMath.mulDiv(collValue, BPS - bufferBps, BPS);
-        if (usable < debt) return 3;
-        return 0;
+        return LiqRangeMath.forceCloseReason(
+            pos.collateralIs0,
+            tick,
+            pos.tickEnd,
+            pos.expiry,
+            pos.collateral,
+            _debtVault(pos).debtAssetsForShares(pos.debtShares),
+            pos.ltBps,
+            configs[pos.poolId].slippageBufferBps
+        );
     }
 
     // ------------------------------------------------------------------ closing & accounting
@@ -798,7 +786,14 @@ contract TrueLendHook is BaseHook {
 
     // ------------------------------------------------------------------ admin
 
+    /// misconfiguration here can stall a pool's liquidations outright (zero pacing
+    /// fields divide or multiply chunk sizes to nothing) or void its economics
+    /// (LT gap near zero); bound the load-bearing fields
     function setConfig(PoolId poolId, Config calldata cfg) external onlyOwner {
+        if (
+            cfg.targetChunks == 0 || cfg.chunkInterval == 0 || cfg.timeCapX == 0 || cfg.maxChunkDepthBps == 0
+                || cfg.rangeWidth <= 0 || cfg.termSeconds == 0 || cfg.maxLtBps < MIN_LT_BPS || cfg.maxLtBps > 9950
+        ) revert BadConfig();
         configs[poolId] = cfg;
     }
 

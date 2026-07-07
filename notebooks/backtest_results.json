@@ -1,0 +1,688 @@
+{
+  "horizon_h": 24,
+  "dt_s": 60.0,
+  "open_every_min": 60,
+  "production": {
+    "stable": {
+      "lt": 0.99,
+      "N": 100,
+      "tau": 60.0
+    },
+    "major": {
+      "lt": 0.95,
+      "N": 50,
+      "tau": 60.0
+    },
+    "longtail": {
+      "lt": 0.9,
+      "N": 100,
+      "tau": 60.0
+    }
+  },
+  "tolerances": {
+    "shortfall_freq": 0.01,
+    "shortfall_sev": 0.05,
+    "exhaustion": 0.005
+  },
+  "calibration_generated_at": "2026-07-06T23:11:08+00:00",
+  "tiers": {
+    "stable": {
+      "total": {
+        "n_episodes": 117,
+        "shortfall_freq": 0.8888888888888888,
+        "shortfall_sev": 0.0735699614944293,
+        "exhaustion": 0.9230769230769231,
+        "cost_med_bps": 32.93665148741421,
+        "cost_p95_bps": 35.714017099085765,
+        "dur_med_h": 0.016666666666666666,
+        "frac": {
+          "repaid": 0.008547008547008548,
+          "recovered": 0.06837606837606838,
+          "backstop": 0.9230769230769231,
+          "live": 0.0
+        },
+        "tier": "stable",
+        "lt": 0.99,
+        "N": 100,
+        "tau": 60.0,
+        "accepted": false
+      },
+      "per_window": {
+        "may21-crash": {
+          "opened": 332,
+          "episodes": 0
+        },
+        "luna": {
+          "n_episodes": 105,
+          "shortfall_freq": 0.9523809523809523,
+          "shortfall_sev": 0.0761385817997025,
+          "exhaustion": 0.9904761904761905,
+          "cost_med_bps": 32.93665148741421,
+          "cost_p95_bps": 35.7225502347418,
+          "dur_med_h": 0.016666666666666666,
+          "frac": {
+            "repaid": 0.009523809523809525,
+            "recovered": 0.0,
+            "backstop": 0.9904761904761905,
+            "live": 0.0
+          },
+          "window": "luna",
+          "opened": 332
+        },
+        "ftx": {
+          "skipped": "symbol not trading in this window"
+        },
+        "usdc-depeg": {
+          "n_episodes": 12,
+          "shortfall_freq": 0.3333333333333333,
+          "shortfall_sev": 0.00935445386259913,
+          "exhaustion": 0.3333333333333333,
+          "cost_med_bps": 13.52077303664003,
+          "cost_p95_bps": 35.36170061651234,
+          "dur_med_h": 1.0,
+          "frac": {
+            "repaid": 0.0,
+            "recovered": 0.6666666666666666,
+            "backstop": 0.3333333333333333,
+            "live": 0.0
+          },
+          "window": "usdc-depeg",
+          "opened": 208
+        },
+        "carry-unwind": {
+          "opened": 332,
+          "episodes": 0
+        },
+        "feb25-crash": {
+          "opened": 332,
+          "episodes": 0
+        },
+        "calm-jul23": {
+          "opened": 332,
+          "episodes": 0
+        },
+        "calm-oct24": {
+          "opened": 332,
+          "episodes": 0
+        }
+      }
+    },
+    "major": {
+      "total": {
+        "n_episodes": 1190,
+        "shortfall_freq": 0.013445378151260505,
+        "shortfall_sev": 0.007451369556758625,
+        "exhaustion": 0.09747899159663866,
+        "cost_med_bps": 64.44487981410046,
+        "cost_p95_bps": 80.21495528497955,
+        "dur_med_h": 2.35,
+        "frac": {
+          "repaid": 0.4008403361344538,
+          "recovered": 0.4680672268907563,
+          "backstop": 0.09747899159663866,
+          "live": 0.03361344537815126
+        },
+        "tier": "major",
+        "lt": 0.95,
+        "N": 50,
+        "tau": 60.0,
+        "accepted": false
+      },
+      "per_window": {
+        "may21-crash": {
+          "n_episodes": 207,
+          "shortfall_freq": 0.03864734299516908,
+          "shortfall_sev": 0.004305530686615503,
+          "exhaustion": 0.21256038647342995,
+          "cost_med_bps": 65.68981189039187,
+          "cost_p95_bps": 78.81858674454298,
+          "dur_med_h": 2.5166666666666666,
+          "frac": {
+            "repaid": 0.34782608695652173,
+            "recovered": 0.4396135265700483,
+            "backstop": 0.21256038647342995,
+            "live": 0.0
+          },
+          "window": "may21-crash",
+          "opened": 332
+        },
+        "luna": {
+          "n_episodes": 168,
+          "shortfall_freq": 0.023809523809523808,
+          "shortfall_sev": 0.002033112151717911,
+          "exhaustion": 0.16666666666666666,
+          "cost_med_bps": 53.013716574707296,
+          "cost_p95_bps": 78.7790251000228,
+          "dur_med_h": 1.4666666666666666,
+          "frac": {
+            "repaid": 0.27380952380952384,
+            "recovered": 0.5595238095238095,
+            "backstop": 0.16666666666666666,
+            "live": 0.0
+          },
+          "window": "luna",
+          "opened": 332
+        },
+        "ftx": {
+          "n_episodes": 160,
+          "shortfall_freq": 0.00625,
+          "shortfall_sev": 0.003971457483052534,
+          "exhaustion": 0.18125,
+          "cost_med_bps": 63.273197118573876,
+          "cost_p95_bps": 79.78333272859423,
+          "dur_med_h": 2.1416666666666666,
+          "frac": {
+            "repaid": 0.425,
+            "recovered": 0.39375,
+            "backstop": 0.18125,
+            "live": 0.0
+          },
+          "window": "ftx",
+          "opened": 332
+        },
+        "usdc-depeg": {
+          "n_episodes": 174,
+          "shortfall_freq": 0.0,
+          "shortfall_sev": 0.0,
+          "exhaustion": 0.0,
+          "cost_med_bps": 38.741027774365335,
+          "cost_p95_bps": 80.33282394960865,
+          "dur_med_h": 1.85,
+          "frac": {
+            "repaid": 0.3735632183908046,
+            "recovered": 0.6264367816091954,
+            "backstop": 0.0,
+            "live": 0.0
+          },
+          "window": "usdc-depeg",
+          "opened": 332
+        },
+        "carry-unwind": {
+          "n_episodes": 207,
+          "shortfall_freq": 0.004830917874396135,
+          "shortfall_sev": 0.004838745634147049,
+          "exhaustion": 0.043478260869565216,
+          "cost_med_bps": 65.61636877372177,
+          "cost_p95_bps": 80.00149387112714,
+          "dur_med_h": 2.3,
+          "frac": {
+            "repaid": 0.40096618357487923,
+            "recovered": 0.43478260869565216,
+            "backstop": 0.043478260869565216,
+            "live": 0.12077294685990338
+          },
+          "window": "carry-unwind",
+          "opened": 332
+        },
+        "feb25-crash": {
+          "n_episodes": 154,
+          "shortfall_freq": 0.012987012987012988,
+          "shortfall_sev": 0.033917507845571376,
+          "exhaustion": 0.03896103896103896,
+          "cost_med_bps": 62.85480501294165,
+          "cost_p95_bps": 79.79517400670355,
+          "dur_med_h": 2.6666666666666665,
+          "frac": {
+            "repaid": 0.38961038961038963,
+            "recovered": 0.474025974025974,
+            "backstop": 0.03896103896103896,
+            "live": 0.09740259740259741
+          },
+          "window": "feb25-crash",
+          "opened": 332
+        },
+        "calm-jul23": {
+          "n_episodes": 98,
+          "shortfall_freq": 0.0,
+          "shortfall_sev": 0.0,
+          "exhaustion": 0.0,
+          "cost_med_bps": 77.92690825703819,
+          "cost_p95_bps": 80.38411474793101,
+          "dur_med_h": 2.7333333333333334,
+          "frac": {
+            "repaid": 0.8061224489795918,
+            "recovered": 0.19387755102040816,
+            "backstop": 0.0,
+            "live": 0.0
+          },
+          "window": "calm-jul23",
+          "opened": 332
+        },
+        "calm-oct24": {
+          "n_episodes": 22,
+          "shortfall_freq": 0.0,
+          "shortfall_sev": 0.0,
+          "exhaustion": 0.0,
+          "cost_med_bps": 14.14087115014643,
+          "cost_p95_bps": 77.51916061121977,
+          "dur_med_h": 1.2166666666666666,
+          "frac": {
+            "repaid": 0.18181818181818182,
+            "recovered": 0.8181818181818182,
+            "backstop": 0.0,
+            "live": 0.0
+          },
+          "window": "calm-oct24",
+          "opened": 332
+        }
+      }
+    },
+    "longtail": {
+      "total": {
+        "n_episodes": 770,
+        "shortfall_freq": 0.8285714285714286,
+        "shortfall_sev": 0.08533412795775334,
+        "exhaustion": 0.8285714285714286,
+        "cost_med_bps": 921.1180918168109,
+        "cost_p95_bps": 953.3401927946036,
+        "dur_med_h": 1.3333333333333333,
+        "frac": {
+          "repaid": 0.0,
+          "recovered": 0.17142857142857143,
+          "backstop": 0.8285714285714286,
+          "live": 0.0
+        },
+        "tier": "longtail",
+        "lt": 0.9,
+        "N": 100,
+        "tau": 60.0,
+        "accepted": false
+      },
+      "per_window": {
+        "may21-crash": {
+          "skipped": "symbol not trading in this window"
+        },
+        "luna": {
+          "skipped": "symbol not trading in this window"
+        },
+        "ftx": {
+          "skipped": "symbol not trading in this window"
+        },
+        "usdc-depeg": {
+          "skipped": "symbol not trading in this window"
+        },
+        "carry-unwind": {
+          "n_episodes": 213,
+          "shortfall_freq": 0.8075117370892019,
+          "shortfall_sev": 0.08554406819186774,
+          "exhaustion": 0.8075117370892019,
+          "cost_med_bps": 920.4876487245772,
+          "cost_p95_bps": 949.0679959069273,
+          "dur_med_h": 1.3,
+          "frac": {
+            "repaid": 0.0,
+            "recovered": 0.19248826291079812,
+            "backstop": 0.8075117370892019,
+            "live": 0.0
+          },
+          "window": "carry-unwind",
+          "opened": 332
+        },
+        "feb25-crash": {
+          "n_episodes": 204,
+          "shortfall_freq": 0.8676470588235294,
+          "shortfall_sev": 0.08516775295844085,
+          "exhaustion": 0.8676470588235294,
+          "cost_med_bps": 928.906336813031,
+          "cost_p95_bps": 945.790531626039,
+          "dur_med_h": 1.25,
+          "frac": {
+            "repaid": 0.0,
+            "recovered": 0.1323529411764706,
+            "backstop": 0.8676470588235294,
+            "live": 0.0
+          },
+          "window": "feb25-crash",
+          "opened": 332
+        },
+        "calm-jul23": {
+          "n_episodes": 177,
+          "shortfall_freq": 0.8418079096045198,
+          "shortfall_sev": 0.0871106409784982,
+          "exhaustion": 0.8418079096045198,
+          "cost_med_bps": 930.4127432224591,
+          "cost_p95_bps": 959.6037760009146,
+          "dur_med_h": 1.2,
+          "frac": {
+            "repaid": 0.0,
+            "recovered": 0.15819209039548024,
+            "backstop": 0.8418079096045198,
+            "live": 0.0
+          },
+          "window": "calm-jul23",
+          "opened": 332
+        },
+        "calm-oct24": {
+          "n_episodes": 176,
+          "shortfall_freq": 0.7954545454545454,
+          "shortfall_sev": 0.08339582949003657,
+          "exhaustion": 0.7954545454545454,
+          "cost_med_bps": 913.6256774549215,
+          "cost_p95_bps": 937.1612086089551,
+          "dur_med_h": 1.4833333333333334,
+          "frac": {
+            "repaid": 0.0,
+            "recovered": 0.20454545454545456,
+            "backstop": 0.7954545454545454,
+            "live": 0.0
+          },
+          "window": "calm-oct24",
+          "opened": 332
+        }
+      }
+    }
+  },
+  "longtail_design_depth_sensitivity": {
+    "n_episodes": 770,
+    "shortfall_freq": 0.016883116883116882,
+    "shortfall_sev": 0.065238454487248,
+    "exhaustion": 0.016883116883116882,
+    "cost_med_bps": 118.3174343967891,
+    "cost_p95_bps": 121.06428621590199,
+    "dur_med_h": 3.933333333333333,
+    "frac": {
+      "repaid": 0.5454545454545454,
+      "recovered": 0.38701298701298703,
+      "backstop": 0.016883116883116882,
+      "live": 0.05064935064935065
+    },
+    "tier": "longtail",
+    "lt": 0.9,
+    "N": 100,
+    "tau": 60.0,
+    "accepted": false
+  },
+  "walk_forward": [
+    {
+      "tier": "stable",
+      "window": "may21-crash",
+      "sigma_trailing": 0.03916148939643409,
+      "lt_max_trailing_cf": 0.9850000000000004,
+      "production_lt": 0.99,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "stable",
+      "window": "luna",
+      "sigma_trailing": 0.011093358295396165,
+      "lt_max_trailing_cf": 0.9900000000000004,
+      "production_lt": 0.99,
+      "cf_ok": true,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "stable",
+      "window": "ftx",
+      "sigma_trailing": 0.1543727823586245,
+      "lt_max_trailing_cf": 0.9800000000000004,
+      "production_lt": 0.99,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "stable",
+      "window": "carry-unwind",
+      "sigma_trailing": 0.020603143516751014,
+      "lt_max_trailing_cf": 0.9900000000000004,
+      "production_lt": 0.99,
+      "cf_ok": true,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "stable",
+      "window": "feb25-crash",
+      "sigma_trailing": 0.01764942081780984,
+      "lt_max_trailing_cf": 0.9900000000000004,
+      "production_lt": 0.99,
+      "cf_ok": true,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "stable",
+      "window": "calm-jul23",
+      "sigma_trailing": 0.09885728606501248,
+      "lt_max_trailing_cf": 0.9800000000000004,
+      "production_lt": 0.99,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "stable",
+      "window": "calm-oct24",
+      "sigma_trailing": 0.012013315550109253,
+      "lt_max_trailing_cf": 0.9900000000000004,
+      "production_lt": 0.99,
+      "cf_ok": true,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0
+    },
+    {
+      "tier": "major",
+      "window": "may21-crash",
+      "sigma_trailing": 1.6411504189919917,
+      "lt_max_trailing_cf": 0.9100000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0005,
+      "sim_exhaustion": 0.00325
+    },
+    {
+      "tier": "major",
+      "window": "luna",
+      "sigma_trailing": 0.9905937817719048,
+      "lt_max_trailing_cf": 0.9350000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.00025,
+      "sim_exhaustion": 0.0025
+    },
+    {
+      "tier": "major",
+      "window": "ftx",
+      "sigma_trailing": 1.3214933288838187,
+      "lt_max_trailing_cf": 0.9200000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0005,
+      "sim_exhaustion": 0.0005
+    },
+    {
+      "tier": "major",
+      "window": "usdc-depeg",
+      "sigma_trailing": 0.975212938700392,
+      "lt_max_trailing_cf": 0.9350000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0005,
+      "sim_exhaustion": 0.00125
+    },
+    {
+      "tier": "major",
+      "window": "carry-unwind",
+      "sigma_trailing": 0.8092813945950046,
+      "lt_max_trailing_cf": 0.9400000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.00025,
+      "sim_exhaustion": 0.0015
+    },
+    {
+      "tier": "major",
+      "window": "feb25-crash",
+      "sigma_trailing": 0.7467907046580395,
+      "lt_max_trailing_cf": 0.9450000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.0005
+    },
+    {
+      "tier": "major",
+      "window": "calm-jul23",
+      "sigma_trailing": 0.6404447679655543,
+      "lt_max_trailing_cf": 0.9500000000000004,
+      "production_lt": 0.95,
+      "cf_ok": true,
+      "sim_ok": true,
+      "sim_sf_freq": 0.0,
+      "sim_exhaustion": 0.00025
+    },
+    {
+      "tier": "major",
+      "window": "calm-oct24",
+      "sigma_trailing": 0.8543609389949799,
+      "lt_max_trailing_cf": 0.9400000000000004,
+      "production_lt": 0.95,
+      "cf_ok": false,
+      "sim_ok": true,
+      "sim_sf_freq": 0.00025,
+      "sim_exhaustion": 0.00175
+    },
+    {
+      "tier": "longtail",
+      "window": "carry-unwind",
+      "sigma_trailing": 2.9829130120032876,
+      "lt_max_trailing_cf": 0.8650000000000003,
+      "production_lt": 0.9,
+      "cf_ok": false,
+      "sim_ok": false,
+      "sim_sf_freq": 0.8445,
+      "sim_exhaustion": 0.8445
+    },
+    {
+      "tier": "longtail",
+      "window": "feb25-crash",
+      "sigma_trailing": 2.239504332366825,
+      "lt_max_trailing_cf": 0.8900000000000003,
+      "production_lt": 0.9,
+      "cf_ok": false,
+      "sim_ok": false,
+      "sim_sf_freq": 0.88025,
+      "sim_exhaustion": 0.88025
+    },
+    {
+      "tier": "longtail",
+      "window": "calm-jul23",
+      "sigma_trailing": 2.3812625474970535,
+      "lt_max_trailing_cf": 0.8850000000000003,
+      "production_lt": 0.9,
+      "cf_ok": false,
+      "sim_ok": false,
+      "sim_sf_freq": 0.8795,
+      "sim_exhaustion": 0.8795
+    },
+    {
+      "tier": "longtail",
+      "window": "calm-oct24",
+      "sigma_trailing": 1.7399271256498614,
+      "lt_max_trailing_cf": 0.9050000000000004,
+      "production_lt": 0.9,
+      "cf_ok": true,
+      "sim_ok": false,
+      "sim_sf_freq": 0.90225,
+      "sim_exhaustion": 0.90225
+    }
+  ],
+  "llamma_anchor": {
+    "stable": {
+      "n": 8,
+      "cost_med_bps": 31.64160032894739,
+      "dur_mean_h": 0.016666666666666666
+    },
+    "major": {
+      "n": 12,
+      "cost_med_bps": 73.29258956596149,
+      "dur_mean_h": 3.165277777777778
+    },
+    "longtail": {
+      "n": 12,
+      "cost_med_bps": 936.2263771719312,
+      "dur_mean_h": 2.0458333333333334
+    }
+  },
+  "sim_reference": {
+    "stable": {
+      "n_episodes": 4000,
+      "shortfall_freq": 0.00075,
+      "shortfall_sev": 0.003598865265973778,
+      "exhaustion": 0.093,
+      "cost_med_bps": 19.010024058547668,
+      "cost_p95_bps": 31.733639577432154,
+      "dur_med_h": 2.5616666666666665,
+      "frac": {
+        "repaid": 0.2315,
+        "recovered": 0.67325,
+        "backstop": 0.093,
+        "live": 0.00225
+      },
+      "tier": "stable",
+      "lt": 0.99,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9
+    },
+    "major": {
+      "n_episodes": 4000,
+      "shortfall_freq": 0.001,
+      "shortfall_sev": 0.006784651957712744,
+      "exhaustion": 0.00525,
+      "cost_med_bps": 69.721154198348,
+      "cost_p95_bps": 80.08401900139359,
+      "dur_med_h": 2.76,
+      "frac": {
+        "repaid": 0.4715,
+        "recovered": 0.52325,
+        "backstop": 0.00525,
+        "live": 0.0
+      },
+      "tier": "major",
+      "lt": 0.95,
+      "N": 50,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9
+    },
+    "longtail": {
+      "n_episodes": 4000,
+      "shortfall_freq": 0.8525,
+      "shortfall_sev": 0.08378778318467299,
+      "exhaustion": 0.8525,
+      "cost_med_bps": 921.9002966756734,
+      "cost_p95_bps": 952.5650205301843,
+      "dur_med_h": 1.29,
+      "frac": {
+        "repaid": 0.0,
+        "recovered": 0.1475,
+        "backstop": 0.8525,
+        "live": 0.0
+      },
+      "tier": "longtail",
+      "lt": 0.9,
+      "N": 100,
+      "tau": 60.0,
+      "f": 1.4142135623730951,
+      "kappa": 0.9
+    }
+  }
+}

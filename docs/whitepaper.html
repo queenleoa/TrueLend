@@ -233,7 +233,7 @@
   <p class="kicker">Whitepaper · Version 2.0 · July 2026</p>
   <h1>TrueLend: Oracleless Lending with AMM-Native Gradual Liquidation</h1>
   <p class="byline">A Uniswap v4 hook protocol</p>
-  <p class="deploy-line">Deployed · Unichain Sepolia (1301) · Hook <b>0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0</b></p>
+  <p class="deploy-line">Deployed · Unichain Sepolia (1301) · Hook <b>0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0</b></p>
 
   <!-- identity motif: a price axis with a liquidation band -->
   <svg class="band-motif" viewBox="0 0 720 46" role="img" aria-label="Price axis with a shaded liquidation band">
@@ -751,13 +751,13 @@
 
 <h2><span class="no">10</span>Implementation and status</h2>
 
-<p>Six contracts, ~1,600 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 23.3 kB), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, and linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>. Any ERC-20/ERC-20 pool initialized with the hook becomes a lending market automatically. 78 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 24 full-lifecycle integration scenarios (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
+<p>Six contracts, ~1,600 lines of Solidity 0.8.26: <code>TrueLendHook</code> (lending core + engine, 24,444 bytes — 132 under the EIP-170 limit), <code>LendingVault</code> ×2 per pool, <code>VaultFactory</code>, and linked libraries <code>LiqRangeMath</code>, <code>ChunkMath</code>, <code>TruncatedOracle</code>, <code>TriggerIndex</code>. Any ERC-20/ERC-20 pool initialized with the hook becomes a lending market automatically. 86 tests: fuzzed unit tests for all math, vault accounting and waterfall tests, 28 full-lifecycle integration scenarios plus 4 native-ETH pool scenarios (including LT-99 leverage, manipulation rejection, the drained-pool backstop, and a 6-vs-18-decimals pair), and randomized invariant tests.</p>
 
 <p><strong>Deployment — Unichain Sepolia (1301):</strong></p>
 <div class="tablewrap"><table>
   <tr><th>Contract</th><th>Address</th></tr>
-  <tr><td>TrueLendHook</td><td><code>0x7F16eb24fd0A9619Fa52312AE65cC574C359D0c0</code></td></tr>
-  <tr><td>VaultFactory</td><td><code>0xb95f855B1252c51A3AD167b3D1F5ab8B121107E6</code></td></tr>
+  <tr><td>TrueLendHook</td><td><code>0xCD52d3f33DAf64aBE879DA38F0e55a280fc450c0</code></td></tr>
+  <tr><td>VaultFactory</td><td><code>0x1C4E9f5b89e096c98592a304f4aF8DDc529fA057</code></td></tr>
   <tr><td>PoolManager (canonical)</td><td><code>0x00B036B58a818B1BC34d502D3fE730Db729e62AC</code></td></tr>
 </table></div>
 

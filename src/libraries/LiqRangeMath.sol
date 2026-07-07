@@ -110,6 +110,51 @@ library LiqRangeMath {
         return FullMath.mulDiv(FullMath.mulDiv(amount, 1 << 96, sqrtPriceX96), 1 << 96, sqrtPriceX96);
     }
 
+    /// @notice Open-time check: the borrow/collateral LTV at `worstTick` must sit
+    /// at or below headroom·LT (headroom in bps applied to LT), so interest accrual
+    /// does not immediately erode a fresh position into its range.
+    function openLtvOk(
+        uint256 collateral,
+        uint256 borrow,
+        int24 worstTick,
+        bool collateralIs0,
+        uint16 ltBps,
+        uint256 headroomBps
+    ) public pure returns (bool) {
+        uint256 collValueInDebt =
+            convertAtSqrtPrice(collateral, TickMath.getSqrtPriceAtTick(worstTick), collateralIs0);
+        return collValueInDebt != 0
+            && FullMath.mulDiv(borrow, BPS * BPS, collValueInDebt) <= uint256(ltBps) * headroomBps;
+    }
+
+    /// @notice Force-close eligibility: 1 = range exhausted, 2 = term expired,
+    /// 3 = health breached at the current price, 0 = none.
+    ///
+    /// Health breach: at the CURRENT price, remaining collateral (after a buffer)
+    /// no longer covers the debt — interest erosion or a partial gap-through has
+    /// made waiting strictly worse for lenders. The buffer is capped at half the
+    /// position's own LT gap: a fixed buffer wider than (1 − LT) would preempt
+    /// the entire gradual range for high-LT positions, since a position enters
+    /// its range at LTV = LT by definition (parameter-model finding, PARAMETERS.md).
+    function forceCloseReason(
+        bool collateralIs0,
+        int24 tick,
+        int24 tickEnd,
+        uint256 expiry,
+        uint256 collateral,
+        uint256 debt,
+        uint16 ltBps,
+        uint256 bufferBps
+    ) public view returns (uint8) {
+        if (pastRange(collateralIs0, tick, tickEnd)) return 1;
+        if (block.timestamp > expiry) return 2;
+        uint256 collValue = convertAtSqrtPrice(collateral, TickMath.getSqrtPriceAtTick(tick), collateralIs0);
+        uint256 halfGap = (BPS - ltBps) / 2;
+        if (bufferBps > halfGap) bufferBps = halfGap;
+        if (FullMath.mulDiv(collValue, BPS - bufferBps, BPS) < debt) return 3;
+        return 0;
+    }
+
     /// @notice Token depth of `liquidity` spread across [tickA, tickB], measured
     /// in the collateral token's units. Rough but cheap and monotone — used for
     /// the chunk pressure metric and the per-chunk impact cap.

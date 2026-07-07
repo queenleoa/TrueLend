@@ -3,7 +3,12 @@
 #
 # Implements PARAMETERS.md §7: closed-form first cuts, a faithful Python replica of the
 # on-chain chunk engine (cross-checked against the Solidity unit-test vectors), a
-# jump-diffusion episode simulator, the Monte-Carlo sweep, and the acceptance report.
+# jump-diffusion episode simulator with antithetic variates, the Monte-Carlo sweep,
+# and the acceptance report.
+#
+# The engine itself lives in [`engine.py`](engine.py) and is shared verbatim with the
+# historical-replay backtest ([`backtest.py`](backtest.py)) — one implementation of the
+# episode semantics, two path sources (simulated and real).
 #
 # Run headless:  .venv/bin/python notebooks/parameters.py
 # Outputs:       notebooks/figures/*.png, notebooks/results.json
@@ -12,115 +17,23 @@
 import json
 import math
 import os
+
 import numpy as np
 
-rng = np.random.default_rng(20260706)
+from engine import (
+    TIERS, DEFAULTS, EPS, YEAR, CHUNK_DEPTH_CAP,
+    chunk_size, penalty_rate, closed_forms, simulate, accepted,
+    SURFACE, INK, MUTED, BLUE, AQUA, YELLOW, RED, apply_style,
+)
+
 FIGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
 os.makedirs(FIGDIR, exist_ok=True)
-
-# ---------------------------------------------------------------- protocol constants
-# Mirror src/TrueLendHook.sol + VaultFactory.sol. Change here only to model a change there.
-YEAR = 365 * 24 * 3600
-BASE_PENALTY = 0.005          # 0.5% of proceeds
-PENALTY_TIME_CAP = 5.0        # ×5 after 4h in liquidation
-TIME_CATCHUP_CAP = 5.0        # pacing catch-up multiplier cap
-CHUNK_DEPTH_CAP = 0.01        # one chunk ≤ 1% of in-range depth
-HEALTH_BUFFER_CFG = 0.02      # forceClose reason-3 buffer config (slippageBufferBps)
-
-def health_buffer(lt):
-    """Contract: buffer capped at half the position's LT gap (TrueLendHook fix)."""
-    return min(HEALTH_BUFFER_CFG, (1 - lt) / 2)
-FC_IMPACT = 0.02              # modeled avg execution impact of a backstop sale (≤10% bound)
-OPEN_HEADROOM = 0.95          # opening LTV ≤ 95% of LT
-R_MAX_APR = 0.54              # vault rate at the 90% utilization hard cap
-
-# ---------------------------------------------------------------- tier calibration (PARAMETERS.md §3.2)
-TIERS = {
-    "stable":   dict(sigma=0.02, lam=2,  muJ=-0.005, sJ=0.003, fee=0.0005, depth=100.0),
-    "major":    dict(sigma=0.80, lam=20, muJ=-0.08,  sJ=0.06,  fee=0.0030, depth=20.0),
-    "longtail": dict(sigma=1.50, lam=60, muJ=-0.15,  sJ=0.10,  fee=0.0100, depth=5.0),
-}
-# depth = one-sided in-range book depth in units of the position's collateral (position = 1)
-
-DEFAULTS = dict(N=100, tau=60.0, f=math.sqrt(2), kappa=0.9)
-EPS = dict(shortfall_freq=0.01, shortfall_sev=0.05, exhaustion=0.005)  # §2 tolerances
+print("engine replica: all Solidity test vectors reproduced (asserted on import)")
 
 # %% [markdown]
-# ## 1. Engine replica — `ChunkMath` port, cross-checked against the Solidity test vectors
+# ## 1. Closed-form first cuts (PARAMETERS.md §4–6)
 
 # %%
-def chunk_size(remaining, target_chunks, elapsed, interval, time_cap, depth01, pressure01,
-               min_chunk, max_chunk):
-    """Float port of ChunkMath.chunkSize (test/libraries/ChunkMath.t.sol semantics)."""
-    if np.isscalar(remaining):
-        remaining = np.asarray([remaining], dtype=float)
-        scalar = True
-    else:
-        scalar = False
-    remaining = np.asarray(remaining, dtype=float)
-    elapsed = np.broadcast_to(np.asarray(elapsed, dtype=float), remaining.shape).copy()
-    depth01 = np.clip(np.broadcast_to(np.asarray(depth01, dtype=float), remaining.shape), 0, 1)
-    pressure01 = np.clip(np.broadcast_to(np.asarray(pressure01, dtype=float), remaining.shape), 0, 1)
-
-    due = (remaining > 0) & (elapsed >= interval)
-    base = remaining / target_chunks
-    timex = np.minimum(np.floor(elapsed / interval), time_cap)  # Solidity: integer division
-    size = base * timex * (1 + depth01) * (1 + pressure01)
-    size = np.minimum(size, max_chunk)
-    size = np.maximum(size, min_chunk)
-    size = np.minimum(size, remaining)
-    size = np.where(due, size, 0.0)
-    return float(size[0]) if scalar else size
-
-
-def penalty_rate(lt, t_in_liq):
-    """Hook's effective penalty: ChunkMath.penaltyBps capped at a quarter of the LT gap."""
-    timex = np.minimum(1.0 + t_in_liq / 3600.0, PENALTY_TIME_CAP)
-    return np.minimum(BASE_PENALTY * lt * timex, (1 - lt) / 4)
-
-
-# Cross-check: the exact vectors from test/libraries/ChunkMath.t.sol (scaled 1e18 -> 1.0)
-def _vec(**kw):
-    p = dict(remaining=100.0, target_chunks=100, elapsed=60, interval=60, time_cap=5,
-             depth01=0.0, pressure01=0.0, min_chunk=0.001, max_chunk=50.0)
-    p.update(kw)
-    return chunk_size(p["remaining"], p["target_chunks"], p["elapsed"], p["interval"],
-                      p["time_cap"], p["depth01"], p["pressure01"], p["min_chunk"], p["max_chunk"])
-
-assert _vec() == 1.0                                   # test_baseChunk_noMultipliers
-assert _vec(elapsed=59) == 0.0                         # test_zeroBeforeInterval
-assert _vec(remaining=0) == 0.0                        # test_zeroWhenNothingRemains
-assert _vec(elapsed=180) == 3.0                        # test_timeMultiplier catch-up
-assert _vec(elapsed=6000) == 5.0                       # ...capped
-assert _vec(depth01=1.0) == 2.0                        # test_depthAndPressure
-assert _vec(pressure01=1.0) == 2.0
-assert _vec(depth01=1.0, pressure01=1.0) == 4.0
-assert _vec(depth01=0.5) == 1.5                        # test_halfDepth
-assert _vec(max_chunk=0.5) == 0.5                      # test_maxChunkClamp
-assert abs(penalty_rate(0.90, 0) - 0.0045) < 1e-12     # test_penalty_knownValues (45 bps)
-assert abs(penalty_rate(0.90, 3600) - 0.0090) < 1e-12  # 90 bps after 1h
-assert abs(penalty_rate(0.90, 36000) - 0.0225) < 1e-12 # capped at 225 bps
-print("engine replica: all Solidity test vectors reproduced")
-
-# %% [markdown]
-# ## 2. Closed-form first cuts (PARAMETERS.md §4–6)
-
-# %%
-def closed_forms(tier_name, lt, N=None, tau=None, f=None):
-    t = TIERS[tier_name]
-    N = N or DEFAULTS["N"]; tau = tau or DEFAULTS["tau"]; f = f or DEFAULTS["f"]
-    mbar = 1.5                                   # episode-average pacing multiplier
-    q = mbar / N
-    phi = min(lt * 1.02, 0.995)                  # sold fraction needed (2% avg discount)
-    k = math.log(1 - phi) / math.log(1 - q)      # intervals to repay
-    T = k * tau                                  # episode duration, seconds
-    sigT = t["sigma"] * math.sqrt(T / YEAR)
-    mu = 2.33 * sigT                             # 99th-pct adverse drift
-    s = CHUNK_DEPTH_CAP / 2 + t["fee"]           # per-chunk execution shortfall bound
-    i = R_MAX_APR * T / YEAR
-    pi = min(BASE_PENALTY * lt * min(1 + (T / 2) / 3600, PENALTY_TIME_CAP), (1 - lt) / 4)
-    return dict(T_h=T / 3600, mu=mu, s=s, i=i, pi=pi, rhs=s + pi + i + mu)
-
 print(f"{'tier':<10}{'LT':>5}{'T (h)':>8}{'s':>8}{'π':>8}{'i':>9}{'μ':>8}{'RHS':>8}{'1-LT':>7}")
 first_cut = {}
 for tier in TIERS:
@@ -132,119 +45,13 @@ for tier in TIERS:
               f"{cf['i']:>9.3%}{cf['mu']:>8.2%}{cf['rhs']:>8.2%}{1-lt:>6.0%} {ok}")
 
 # %% [markdown]
-# ## 3. Episode simulator — jump-diffusion price, full engine semantics
+# ## 2. Monte-Carlo sweep
 #
 # Episodes start at range entry (price = range start, debt = LT × collateral value —
 # the definition of the range start). Chunks execute once per interval while in range
 # (poke-backstopped); pause on exit; recovery = 1h continuously above the range start;
 # backstops per the contract: range exhaustion and the current-price health check.
-
-# %%
-def simulate(tier_name, lt, N, tau, f, kappa, n_paths=4000, dt=12.0, horizon_h=12.0,
-             seed=0):
-    t = TIERS[tier_name]
-    r = np.random.default_rng(seed)
-    n_steps = int(horizon_h * 3600 / dt)
-    sig_dt = t["sigma"] * math.sqrt(dt / YEAR)
-    jump_p = t["lam"] * dt / YEAR
-    X = t["depth"]                       # in-range depth, collateral units
-    fee = t["fee"]
-    P_end = 1.0 / f
-
-    logP = np.zeros(n_paths)             # price starts at range start = 1.0
-    C = np.ones(n_paths)                 # collateral
-    D = np.full(n_paths, lt)             # debt = LT · C · P_start
-    impact = np.zeros(n_paths)           # persistent own-impact displacement (1-κ share)
-    last_chunk = np.full(n_paths, -tau)  # first chunk due immediately
-    t_in_liq = np.zeros(n_paths)
-    t_above = np.zeros(n_paths)
-    cost = np.zeros(n_paths)             # borrower execution+penalty cost, value units
-    shortfall = np.zeros(n_paths)
-    duration = np.full(n_paths, np.nan)
-    outcome = np.zeros(n_paths, dtype=np.int8)   # 0 live · 1 repaid · 2 recovered · 3 backstop-clean · 4 backstop-shortfall
-
-    active = np.ones(n_paths, dtype=bool)
-    for step in range(1, n_steps + 1):
-        now = step * dt
-        idx = active
-        if not idx.any():
-            break
-        z = r.standard_normal(idx.sum())
-        logP[idx] += sig_dt * z - 0.5 * sig_dt**2
-        jumps = r.random(idx.sum()) < jump_p
-        if jumps.any():
-            j = r.normal(t["muJ"], t["sJ"], jumps.sum())
-            tmp = logP[idx]; tmp[jumps] += j; logP[idx] = tmp
-
-        P = np.exp(logP) * (1 - impact)
-        in_range = idx & (P <= 1.0) & (P >= P_end)
-        above = idx & (P > 1.0)
-        t_in_liq[in_range] += dt
-        t_above[above] += dt
-        t_above[in_range] = 0.0
-
-        # --- backstops: range exhaustion, health breach ------------------------------
-        breach = idx & ((P < P_end) | (C * P * (1 - health_buffer(lt)) < D))
-        if breach.any():
-            proceeds = C[breach] * P[breach] * (1 - fee - FC_IMPACT)
-            pen = proceeds * penalty_rate(lt, t_in_liq[breach])
-            net = proceeds - pen
-            cost[breach] += C[breach] * P[breach] * (fee + FC_IMPACT) + pen
-            sf = np.maximum(D[breach] - net, 0.0)
-            shortfall[breach] = sf
-            duration[breach] = now
-            outcome[breach] = np.where(sf > 1e-12, 4, 3)
-            C[breach] = 0.0; D[breach] = 0.0
-            active &= ~breach
-
-        # --- due chunks ---------------------------------------------------------------
-        due = in_range & active & (now - last_chunk >= tau)
-        if due.any():
-            depth01 = np.clip(-logP[due] / math.log(f), 0, 1)
-            pressure01 = np.clip(C[due] / X, 0, 1)
-            x = chunk_size(C[due], N, now - last_chunk[due], tau, TIME_CATCHUP_CAP,
-                           depth01, pressure01, 0.0, CHUNK_DEPTH_CAP * X)
-            slip = x / (2 * X) + fee
-            proceeds = x * P[due] * (1 - slip)
-            pen = proceeds * penalty_rate(lt, t_in_liq[due])
-            D[due] -= proceeds - pen
-            C[due] -= x
-            cost[due] += x * P[due] * slip + pen
-            impact[due] += (1 - kappa) * x / X
-            last_chunk[due] = now
-
-        # --- closures -------------------------------------------------------------------
-        repaid = active & (D <= 1e-12)
-        if repaid.any():
-            duration[repaid] = now; outcome[repaid] = 1; active &= ~repaid
-        recovered = active & (t_above >= 3600.0)
-        if recovered.any():
-            duration[recovered] = now; outcome[recovered] = 2; active &= ~recovered
-
-    live = outcome == 0
-    duration[live] = n_steps * dt
-    sf_pos = shortfall > 1e-12
-    return dict(
-        tier=tier_name, lt=lt, N=N, tau=tau, f=f, kappa=kappa,
-        shortfall_freq=float(sf_pos.mean()),
-        shortfall_sev=float((shortfall[sf_pos] / lt).mean()) if sf_pos.any() else 0.0,
-        exhaustion=float((outcome >= 3).mean()),
-        cost_med_bps=float(np.median(cost) * 1e4),
-        cost_p95_bps=float(np.percentile(cost, 95) * 1e4),
-        dur_med_h=float(np.median(duration) / 3600),
-        frac=dict(repaid=float((outcome == 1).mean()), recovered=float((outcome == 2).mean()),
-                  backstop=float((outcome >= 3).mean()), live=float(live.mean())),
-        shortfall_samples=shortfall, cost_samples=cost, outcome=outcome,
-    )
-
-
-def accepted(m):
-    return (m["shortfall_freq"] <= EPS["shortfall_freq"]
-            and m["shortfall_sev"] <= EPS["shortfall_sev"]
-            and m["exhaustion"] <= EPS["exhaustion"])
-
-# %% [markdown]
-# ## 4. Sweep
+# 4,000 antithetic jump-diffusion paths per grid point at 12-second steps.
 
 # %%
 results = []
@@ -275,7 +82,7 @@ for tier in TIERS:
 print("\nsimulated LT_max per tier (defaults):", lt_max)
 
 # %% [markdown]
-# ## 5. Visualizations
+# ## 3. Visualizations
 #
 # Palette: validated categorical slots (blue #2a78d6, aqua #1baf7a, yellow #eda100,
 # red #e34948) on light surface #fcfcfb; sequential = single-hue blue ramp; all
@@ -286,16 +93,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-SURFACE, INK, MUTED = "#fcfcfb", "#0b0b0b", "#52514e"
-BLUE, AQUA, YELLOW, RED = "#2a78d6", "#1baf7a", "#eda100", "#e34948"
-GRID = "#e4e3df"
-plt.rcParams.update({
-    "figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE,
-    "text.color": INK, "axes.edgecolor": MUTED, "axes.labelcolor": MUTED,
-    "xtick.color": MUTED, "ytick.color": MUTED, "font.size": 10,
-    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6,
-    "axes.spines.top": False, "axes.spines.right": False, "figure.dpi": 150,
-})
+apply_style(plt)
 
 def _save(fig, name):
     fig.tight_layout()
@@ -431,7 +229,6 @@ def fig_shortfall():
         sf = np.sort(m["shortfall_samples"] / m["lt"]) * 100
         exceed = 1 - np.arange(1, len(sf) + 1) / len(sf)
         ax.plot(sf, exceed * 100, color=colors[m["lt"]], lw=1.8)
-        k = max((sf > 0).argmax(), 1)
         ax.text(max(sf[-1], 0.1), max(exceed[-1] * 100, 0.02), f"LT {m['lt']:.0%}",
                 fontsize=8.5, color=colors[m["lt"]], va="bottom", ha="right")
     ax.axhline(EPS["shortfall_freq"] * 100, color=MUTED, lw=1, ls=(0, (4, 3)))
@@ -472,7 +269,7 @@ def fig_tradeoff():
 fig_episode(); fig_buffer(); fig_pacing(); fig_shortfall(); fig_tradeoff()
 
 # %% [markdown]
-# ## 6. Persist results
+# ## 4. Persist results
 
 # %%
 out = {
