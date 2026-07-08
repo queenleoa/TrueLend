@@ -12,6 +12,7 @@ Because selling is rate-limited (≈1% of a position per minute, scaled by range
 - **[RESEARCH.md](RESEARCH.md)** — why chunked *active* conversion is the only AMM-native way to do this (passive "inverse range orders" are provably impossible on v4), prior art (LLAMMA, Ajna, Ammalgam, …), manipulation economics, and the math.
 - **[PARAMETERS.md](PARAMETERS.md)** — the parameter-modelling methodology: risk model, derivations, first-cut LT tiers, Monte-Carlo specification. Results: [notebooks/RESULTS.md](notebooks/RESULTS.md); live calibration and the historical-replay backtest across six historic crash weeks: [notebooks/BACKTEST.md](notebooks/BACKTEST.md).
 - **[WHITEPAPER.md](WHITEPAPER.md)** / [docs/TrueLend-Whitepaper.pdf](docs/TrueLend-Whitepaper.pdf) — the formal paper.
+- **[ui/](ui/)** — a Next.js dashboard reading live from the deployed contracts: a liquidation *timeline* (price over time with decay episodes shaded and each chunk marked), liquidity-across-ticks, LP rewards, and simple borrow/lend interfaces.
 
 ## How it works
 

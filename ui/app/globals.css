@@ -1,0 +1,200 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ */
+/*  TrueLend design tokens — ported from the fullmetal.finance          */
+/*  institutional "smart collateral" visual language: warm paper        */
+/*  surfaces, near-black ink, hairline rules, mono eyebrows.            */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --bg: #f7f5f0;
+  --surface: #faf9f7;
+  --surface-2: #f1efe9;
+  --line: rgba(0, 0, 0, 0.08);
+  --line-strong: rgba(0, 0, 0, 0.22);
+
+  --ink: #141414;
+  --ink-soft: #4a4843;
+  --muted: #807e76;
+  --faint: rgba(20, 20, 20, 0.38);
+
+  /* semantic — reserved, not the accent */
+  --pos: #1a6042; /* healthy / gains */
+  --pos-soft: #e4efe7;
+  --warn: #9a6a1c; /* caution */
+  --neg: #b4341f; /* liquidating / loss */
+  --neg-soft: #f3e4df;
+  --accent: #2f5cff; /* the one brand pop — used sparingly */
+
+  --radius-sm: 7px;
+  --radius: 12px;
+  --radius-lg: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121110;
+    --surface: #17150f;
+    --surface-2: #1e1c15;
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.22);
+
+    --ink: #f2efe7;
+    --ink-soft: #b0aea6;
+    --muted: #8a8881;
+    --faint: rgba(236, 233, 225, 0.4);
+
+    --pos: #4bbd8a;
+    --pos-soft: #16281f;
+    --warn: #d1a24e;
+    --neg: #e0674f;
+    --neg-soft: #2a1713;
+    --accent: #6f8bff;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-pos: var(--pos);
+  --color-pos-soft: var(--pos-soft);
+  --color-warn: var(--warn);
+  --color-neg: var(--neg);
+  --color-neg-soft: var(--neg-soft);
+  --color-accent: var(--accent);
+  --radius-lg: var(--radius-lg);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Mono eyebrow / label treatment */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.eyebrow::before {
+  content: "";
+  width: 22px;
+  height: 0.5px;
+  background: var(--muted);
+  display: inline-block;
+}
+
+.tnum {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.card {
+  background: var(--surface);
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* Primary action — the single accent, quiet by default */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 500;
+  padding: 10px 16px;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  border: 0.5px solid transparent;
+}
+.btn-primary {
+  background: var(--ink);
+  color: var(--bg);
+}
+.btn-primary:hover {
+  opacity: 0.88;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+.btn-ghost:hover {
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.field {
+  background: var(--bg);
+  border: 0.5px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 15px;
+  color: var(--ink);
+  width: 100%;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.field:focus {
+  border-color: var(--ink);
+}
+
+/* Segmented control (tabs) */
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius-sm);
+  gap: 2px;
+}
+.seg button {
+  padding: 6px 14px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--muted);
+  transition: all 0.15s;
+  cursor: pointer;
+}
+.seg button[data-active="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

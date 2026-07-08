@@ -12,3 +12,10 @@ out/
 # Dotenv file
 .env
 .venv/
+
+# UI
+ui/node_modules/
+ui/.next/
+ui/out/
+
+.DS_Store

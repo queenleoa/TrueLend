@@ -1,0 +1,390 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "_poolManager",
+        "type": "address",
+        "internalType": "contract IPoolManager"
+      },
+      {
+        "name": "_hook",
+        "type": "address",
+        "internalType": "contract TrueLendHook"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "healthBps",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "hook",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract TrueLendHook"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pool",
+    "inputs": [
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "v",
+        "type": "tuple",
+        "internalType": "struct TrueLendLens.PoolView",
+        "components": [
+          {
+            "name": "vault0",
+            "type": "address",
+            "internalType": "contract LendingVault"
+          },
+          {
+            "name": "vault1",
+            "type": "address",
+            "internalType": "contract LendingVault"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "currentTick",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "activeLiquidity",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "queueLength",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "processedTick",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "cash0",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cash1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalDebt0",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalDebt1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "utilizationBps0",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "utilizationBps1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "borrowRateBps0",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "borrowRateBps1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reserves0",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reserves1",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolManager",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IPoolManager"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "position",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "v",
+        "type": "tuple",
+        "internalType": "struct TrueLendLens.PositionView",
+        "components": [
+          {
+            "name": "borrower",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "poolId",
+            "type": "bytes32",
+            "internalType": "PoolId"
+          },
+          {
+            "name": "collateralIs0",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "collateral",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "ltBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "tickStart",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "tickEnd",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "expiry",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "liqStartedAt",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "timeInLiqAccrued",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "currentTick",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "debt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "collateralValueInDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "ltvBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "healthBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "inRange",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "timeInLiquidation",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "currentPenaltyBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "forceCloseReason",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "previewChunk",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "chunkCollateral",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "penaltyBps_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteOpen",
+    "inputs": [
+      {
+        "name": "key",
+        "type": "tuple",
+        "internalType": "struct PoolKey",
+        "components": [
+          {
+            "name": "currency0",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "currency1",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "fee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "tickSpacing",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "hooks",
+            "type": "address",
+            "internalType": "contract IHooks"
+          }
+        ]
+      },
+      {
+        "name": "collateralIs0",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "collateralAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "borrowAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "ltBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "tickStart",
+        "type": "int24",
+        "internalType": "int24"
+      },
+      {
+        "name": "tickEnd",
+        "type": "int24",
+        "internalType": "int24"
+      },
+      {
+        "name": "gapOk",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "ltvOkAtSpot",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]
