@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">TrueLend architecture</title>
+  <desc id="desc">Lenders fund isolated vaults, borrowers open collateralized positions through the TrueLend hook, and the hook uses Uniswap liquidity and swap flow to execute gradual liquidation and repay debt.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L11,6 L1,11" fill="none" stroke="#171717" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <filter id="rough" x="-4%" y="-4%" width="108%" height="108%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.012" numOctaves="2" seed="13" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="1.1" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <style>
+      .ink { stroke:#171717; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }
+      .box { filter:url(#rough); }
+      .title { font:700 42px 'Comic Sans MS','Bradley Hand',cursive; fill:#171717; }
+      .node { font:700 31px 'Comic Sans MS','Bradley Hand',cursive; fill:#171717; text-anchor:middle; }
+      .small { font:500 23px 'Comic Sans MS','Bradley Hand',cursive; fill:#171717; text-anchor:middle; }
+      .label { font:600 22px 'Comic Sans MS','Bradley Hand',cursive; fill:#171717; text-anchor:middle; paint-order:stroke; stroke:#fbfaf7; stroke-width:8; stroke-linejoin:round; }
+      .arrow { fill:none; stroke:#171717; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrow); }
+      .callback { fill:none; stroke:#171717; stroke-width:3.5; stroke-linecap:round; stroke-dasharray:10 10; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#fbfaf7"/>
+  <text x="800" y="62" class="title" text-anchor="middle">TrueLend: the AMM is the liquidation engine</text>
+
+  <!-- actors -->
+  <g class="box">
+    <rect x="54" y="150" width="280" height="150" rx="30" fill="#f6e7c8" class="ink"/>
+    <text x="194" y="212" class="node">Lenders</text>
+    <text x="194" y="255" class="small">supply either token</text>
+
+    <rect x="1266" y="150" width="280" height="150" rx="30" fill="#f6e7c8" class="ink"/>
+    <text x="1406" y="212" class="node">Borrowers</text>
+    <text x="1406" y="255" class="small">collateral + loan terms</text>
+
+    <rect x="54" y="742" width="280" height="150" rx="30" fill="#dff1dc" class="ink"/>
+    <text x="194" y="804" class="node">LPs</text>
+    <text x="194" y="847" class="small">supply swap liquidity</text>
+
+    <rect x="1266" y="742" width="280" height="150" rx="30" fill="#dff1dc" class="ink"/>
+    <text x="1406" y="804" class="node">Swappers</text>
+    <text x="1406" y="847" class="small">move the pool tick</text>
+  </g>
+
+  <!-- protocol core -->
+  <g class="box">
+    <rect x="500" y="112" width="600" height="190" rx="36" fill="#ffeaa3" class="ink"/>
+    <text x="800" y="178" class="node">Two isolated lending vaults</text>
+    <text x="800" y="220" class="small">Token0 vault  •  Token1 vault</text>
+    <text x="800" y="260" class="small">credit, interest and lender shares</text>
+
+    <rect x="500" y="399" width="600" height="205" rx="36" fill="#a9d7f5" class="ink"/>
+    <text x="800" y="465" class="node">TrueLendHook</text>
+    <text x="800" y="509" class="small">positions • risk ticks • chunk accounting</text>
+    <text x="800" y="551" class="small">afterInitialize  •  beforeSwap  •  afterSwap</text>
+
+    <rect x="500" y="705" width="600" height="205" rx="36" fill="#bce6c5" class="ink"/>
+    <text x="800" y="771" class="node">Uniswap v4 pool</text>
+    <text x="800" y="815" class="small">pool price + execution liquidity</text>
+    <text x="800" y="857" class="small">collateral is swapped into the debt token</text>
+  </g>
+
+  <!-- lender and borrower flows -->
+  <path d="M334 205 C400 172 437 166 500 177" class="arrow"/>
+  <text x="414" y="151" class="label">deposit</text>
+
+  <path d="M1100 177 C1172 166 1214 177 1266 205" class="arrow"/>
+  <text x="1187" y="151" class="label">borrowed token</text>
+
+  <path d="M1266 268 C1194 321 1150 389 1100 451" class="arrow"/>
+  <text x="1218" y="365" class="label">open / repay</text>
+
+  <path d="M697 399 C682 360 687 337 718 302" class="arrow"/>
+  <text x="596" y="354" class="label">repay debt</text>
+
+  <path d="M910 399 C930 363 927 338 903 302" class="callback"/>
+  <text x="1021" y="354" class="label">creates vaults</text>
+
+  <!-- pool interaction -->
+  <path d="M696 604 C674 642 676 668 706 705" class="arrow"/>
+  <text x="559" y="661" class="label">input-capped liquidation swap</text>
+
+  <path d="M910 705 C932 667 929 641 904 604" class="arrow"/>
+  <text x="1032" y="661" class="label">debt-token proceeds</text>
+
+  <path d="M334 810 C397 798 438 795 500 805" class="arrow"/>
+  <text x="413" y="773" class="label">liquidity</text>
+
+  <path d="M500 867 C417 914 353 911 290 873" class="arrow"/>
+  <text x="400" y="936" class="label">fees + conditional donation</text>
+
+  <path d="M1266 810 C1205 797 1163 798 1100 807" class="arrow"/>
+  <text x="1184" y="773" class="label">ordinary swaps</text>
+
+  <path d="M1100 865 C1180 902 1234 896 1285 864" class="arrow"/>
+  <text x="1187" y="931" class="label">swap output</text>
+
+  <path d="M1122 742 C1193 660 1193 576 1100 520" class="callback"/>
+  <text x="1242" y="638" class="label">afterSwap drives chunks</text>
+
+  <!-- permissionless liveness -->
+  <path d="M1266 460 C1195 461 1152 472 1100 491" class="arrow"/>
+  <text x="1304" y="420" class="small">Anyone can call poke</text>
+  <text x="1304" y="450" class="small">when swaps are quiet</text>
+
+</svg>
